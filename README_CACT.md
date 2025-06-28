@@ -57,7 +57,8 @@ CACT是一个用于教学的类C编程语言，支持基本的数据类型、控
 
 ```bash
 # 克隆项目（如果从Git获取）
-git clone <项目地址>
+git clone --recursive https://github.com/ucas-compiler/cact-compiler.git
+# git submodule update --init --recursive
 cd ucas_compiler
 
 # 一键构建
@@ -174,11 +175,13 @@ clang test28.ll runtime.o -o test28
 ### 快速测试所有用例
 ```bash
 # 运行所有33个功能测试
+chmod +x test_all.sh
 ./test_all.sh
 ```
 
 ### 详细测试流程
 ```bash
+chmod +x test_detailed.sh
 # 查看详细的编译和执行过程（测试特定用例）
 ./test_detailed.sh 00 06 28
 
