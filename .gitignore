@@ -1,0 +1,36 @@
+# Build directory
+build/
+
+# Object files
+*.o
+
+# Temporary test files
+test_*.ll
+test_[0-9]*
+!test_all.sh
+test_results/
+
+# CMake generated files (if accidentally created in root)
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# Executable (if accidentally created in root)
+compiler
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db 

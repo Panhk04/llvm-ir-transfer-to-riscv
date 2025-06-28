@@ -1,0 +1,3 @@
+[submodule "testcases"]
+	path = testcases
+	url = git@github.com:ucas-compiler/testcases.git
