@@ -1,5 +1,6 @@
 import re
 from collections import namedtuple, defaultdict
+from enum import Enum
 from ir_parsar import IRParser
 
 # 定义数据结构
@@ -7,21 +8,132 @@ Function = namedtuple('Function', ['name', 'return_type', 'params', 'blocks'])
 BasicBlock = namedtuple('BasicBlock', ['name', 'instructions'])
 Instruction = namedtuple('Instruction', ['opcode', 'operands', 'result', 'types'])
 
-class LLVMIRTranslator:
+# 数据类型枚举
+class DataType(Enum):
+    I1 = 1
+    I8 = 8
+    I16 = 16
+    I32 = 32
+    I64 = 64
+    F32 = 32.0
+    F64 = 64.0
+
+# 寄存器分配器
+class RegisterAllocator:
     def __init__(self):
-        self.reg_counter = 0
-        self.function_reg_map = {}
-        self.label_map = {}
-        self.current_function = None
-        self.stack_offset = 0
-        self.stack_frame = {}
-        
-        # RISC-V寄存器分配
+        # RISC-V 寄存器资源
         self.param_regs = ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
         self.temp_regs = ['t0', 't1', 't2', 't3', 't4', 't5', 't6']
         self.saved_regs = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7']
-        self.reg_map = {}
+        self.float_regs = ['ft0', 'ft1', 'ft2', 'ft3', 'ft4', 'ft5', 'ft6', 'ft7',
+                           'fa0', 'fa1', 'fa2', 'fa3', 'fa4', 'fa5', 'fa6', 'fa7']
         
+        # 寄存器映射和状态
+        self.reg_map = {}
+        self.reg_in_use = defaultdict(bool)
+        self.virtual_regs = []
+        self.liveness = {}
+        
+        # 栈帧信息
+        self.stack_offset = 0
+        self.stack_frame = {}
+        self.param_offset = 0
+        self.saved_regs_offset = {}
+    
+    def reset(self):
+        """重置寄存器分配器状态"""
+        self.reg_map = {}
+        self.reg_in_use = defaultdict(bool)
+        self.virtual_regs = []
+        self.liveness = {}
+        self.stack_offset = 0
+        self.stack_frame = {}
+        self.param_offset = 0
+        self.saved_regs_offset = {}
+    
+    def analyze_liveness(self, function):
+        """分析虚拟寄存器的活跃范围"""
+        # 简化的活跃变量分析
+        self.virtual_regs = []
+        
+        for block in function.blocks:
+            for inst in block.instructions:
+                # 记录定义
+                if inst.result and inst.result.startswith('%'):
+                    if inst.result not in self.virtual_regs:
+                        self.virtual_regs.append(inst.result)
+                        self.liveness[inst.result] = {"def": [], "use": []}
+                    self.liveness[inst.result]["def"].append(inst)
+                
+                # 记录使用
+                for op in inst.operands:
+                    if op.startswith('%') and op in self.liveness:
+                        self.liveness[op]["use"].append(inst)
+    
+    def allocate_register(self, virtual_reg, data_type, is_float=False):
+        """为虚拟寄存器分配物理寄存器"""
+        if virtual_reg in self.reg_map:
+            return self.reg_map[virtual_reg]
+        
+        # 优先尝试分配空闲寄存器
+        reg_pool = self.float_regs if is_float else self.temp_regs
+        for reg in reg_pool:
+            if not self.reg_in_use[reg]:
+                self.reg_map[virtual_reg] = reg
+                self.reg_in_use[reg] = True
+                return reg
+        
+        # 寄存器不足，溢出到栈
+        if is_float:
+            size = 4 if data_type == DataType.F32 else 8
+        else:
+            size = 4  # 默认4字节
+        
+        if virtual_reg not in self.stack_frame:
+            self.stack_offset += size
+            self.stack_frame[virtual_reg] = self.stack_offset
+            return f"{self.stack_offset}(sp)"
+        
+        return f"{self.stack_frame[virtual_reg]}(sp)"
+    
+    def free_register(self, reg):
+        """释放物理寄存器"""
+        if reg in self.reg_in_use:
+            self.reg_in_use[reg] = False
+    
+    def free_virtual_reg(self, virtual_reg):
+        """释放虚拟寄存器占用的资源"""
+        if virtual_reg in self.reg_map:
+            reg = self.reg_map[virtual_reg]
+            self.free_register(reg)
+            del self.reg_map[virtual_reg]
+    
+    def get_stack_size(self):
+        """获取栈帧大小"""
+        return self.stack_offset
+    
+    def get_physical_reg(self, virtual_reg):
+        """获取虚拟寄存器对应的物理寄存器或栈位置"""
+        if virtual_reg in self.reg_map:
+            return self.reg_map[virtual_reg]
+        if virtual_reg in self.stack_frame:
+            return f"{self.stack_frame[virtual_reg]}(sp)"
+        return None
+
+# 优化后的编译器
+class OptimizedLLVMIRTranslator:
+    def __init__(self):
+        self.allocator = RegisterAllocator()
+        self.label_map = {}
+        self.current_function = None
+        self.float_ops = {
+            'fadd': 'fadd.s',
+            'fsub': 'fsub.s',
+            'fmul': 'fmul.s',
+            'fdiv': 'fdiv.s',
+            'fcmp': 'feq.s'
+        }
+    
     def translate(self, ir_code):
         """主翻译函数"""
         # 解析IR代码
@@ -42,9 +154,8 @@ class LLVMIRTranslator:
         # 翻译每个函数
         for func in functions:
             self.current_function = func
-            self.reg_map = {}
-            self.stack_offset = 0
-            self.stack_frame = {}
+            self.allocator.reset()
+            self.allocator.analyze_liveness(func)
             riscv_code.extend(self._translate_function(func))
             
         return "\n".join(riscv_code)
@@ -56,21 +167,6 @@ class LLVMIRTranslator:
             for block in func.blocks:
                 self.label_map[block.name] = f".{func.name}_{block.name[1:]}"
     
-    def _get_physical_reg(self, virtual_reg):
-        """为虚拟寄存器分配物理寄存器"""
-        if virtual_reg not in self.reg_map:
-            # 优先使用临时寄存器
-            if self.temp_regs:
-                reg = self.temp_regs.pop(0)
-                self.reg_map[virtual_reg] = reg
-            else:
-                # 寄存器不足，使用栈空间
-                if virtual_reg not in self.stack_frame:
-                    self.stack_offset += 4
-                    self.stack_frame[virtual_reg] = self.stack_offset
-                return f"{self.stack_frame[virtual_reg]}(sp)"
-        return self.reg_map[virtual_reg]
-    
     def _translate_function(self, function):
         """翻译单个函数"""
         riscv_code = []
@@ -80,9 +176,12 @@ class LLVMIRTranslator:
         riscv_code.append(f"{func_label}:")
         
         # 函数序言
-        riscv_code.append("    # Function prologue")
-        if self.stack_offset > 0:
-            riscv_code.append(f"    addi sp, sp, -{self.stack_offset}")
+        stack_size = self.allocator.get_stack_size()
+        if stack_size > 0:
+            # 确保栈对齐 (16字节对齐)
+            aligned_size = (stack_size + 15) // 16 * 16
+            riscv_code.append("    # Function prologue")
+            riscv_code.append(f"    addi sp, sp, -{aligned_size}")
         
         # 翻译每个基本块
         for block in function.blocks:
@@ -94,37 +193,54 @@ class LLVMIRTranslator:
             for inst in block.instructions:
                 riscv_code.extend(self._translate_instruction(inst))
         
+        # 如果没有返回指令，添加默认返回
+        if not any(inst.opcode == 'ret' for block in function.blocks for inst in block.instructions):
+            riscv_code.append("    # Default return")
+            riscv_code.append("    li a0, 0")
+            riscv_code.append("    ret")
+        
         # 函数尾声
-        if self.stack_offset > 0:
+        if stack_size > 0:
+            aligned_size = (stack_size + 15) // 16 * 16
             riscv_code.append("    # Function epilogue")
-            riscv_code.append(f"    addi sp, sp, {self.stack_offset}")
+            riscv_code.append(f"    addi sp, sp, {aligned_size}")
         
         riscv_code.append("")  # 添加空行分隔函数
         return riscv_code
     
+    def _get_data_type(self, type_str):
+        """将LLVM类型字符串转换为DataType枚举"""
+        if type_str == 'i1':
+            return DataType.I1
+        elif type_str == 'i8':
+            return DataType.I8
+        elif type_str == 'i16':
+            return DataType.I16
+        elif type_str == 'i32':
+            return DataType.I32
+        elif type_str == 'i64':
+            return DataType.I64
+        elif type_str == 'float':
+            return DataType.F32
+        elif type_str == 'double':
+            return DataType.F64
+        return DataType.I32  # 默认
+    
     def _translate_instruction(self, instruction):
         """翻译单条指令"""
-        riscv_instructions = []
         opcode = instruction.opcode
         
         # 返回指令
         if opcode == 'ret':
             return self._translate_ret(instruction)
         
-        # 加载指令
-        elif opcode == 'load':
-            return self._translate_load(instruction)
-        
-        # 存储指令
-        elif opcode == 'store':
-            return self._translate_store(instruction)
-        
-        # 内存分配
-        elif opcode == 'alloca':
-            return self._translate_alloca(instruction)
+        # 内存指令
+        elif opcode in ['alloca', 'load', 'store']:
+            return self._translate_memory(instruction)
         
         # 算术指令
-        elif opcode in ['add', 'sub', 'mul', 'sdiv', 'and', 'or', 'xor']:
+        elif opcode in ['add', 'sub', 'mul', 'sdiv', 'and', 'or', 'xor', 
+                        'fadd', 'fsub', 'fmul', 'fdiv']:
             return self._translate_arithmetic(instruction)
         
         # 移位指令
@@ -132,8 +248,8 @@ class LLVMIRTranslator:
             return self._translate_shift(instruction)
         
         # 比较指令
-        elif opcode == 'icmp':
-            return self._translate_icmp(instruction)
+        elif opcode in ['icmp', 'fcmp']:
+            return self._translate_compare(instruction)
         
         # 分支指令
         elif opcode in ['br', 'jmp']:
@@ -143,111 +259,129 @@ class LLVMIRTranslator:
         elif opcode == 'call':
             return self._translate_call(instruction)
         
+        # 类型转换
+        elif opcode in ['trunc', 'zext', 'sext', 'fptrunc', 'fpext', 'fptoui', 'fptosi', 'uitofp', 'sitofp']:
+            return self._translate_cast(instruction)
+        
         # 未支持指令
-        riscv_instructions.append(f"    # UNSUPPORTED: {instruction}")
-        return riscv_instructions
+        return [f"    # UNSUPPORTED: {instruction}"]
     
     def _translate_ret(self, instruction):
         """翻译返回指令"""
         riscv_instructions = []
         ret_value = instruction.operands[0]
+        ret_type = self._get_data_type(instruction.types[0])
         
-        # 处理返回值
-        if ret_value.isdigit() or (ret_value.startswith('-') and ret_value[1:].isdigit()):
-            # 加载立即数到返回寄存器
-            riscv_instructions.append(f"    li a0, {ret_value}")
-        elif ret_value.startswith('%'):
-            # 从虚拟寄存器加载
-            reg = self._get_physical_reg(ret_value)
-            riscv_instructions.append(f"    mv a0, {reg}")
+        # 浮点返回
+        if ret_type in [DataType.F32, DataType.F64]:
+            if ret_value.isdigit() or (ret_value.startswith('-') and ret_value[1:].isdigit()):
+                # 浮点立即数需要特殊处理
+                float_val = float(ret_value)
+                riscv_instructions.append(f"    lui a0, {float_val.hex()}")
+                riscv_instructions.append(f"    fmv.w.x fa0, a0")
+            elif ret_value.startswith('%'):
+                # 从虚拟寄存器加载
+                reg = self.allocator.get_physical_reg(ret_value)
+                riscv_instructions.append(f"    fmv.s fa0, {reg}")
+        # 整数返回
+        else:
+            if ret_value.isdigit() or (ret_value.startswith('-') and ret_value[1:].isdigit()):
+                riscv_instructions.append(f"    li a0, {ret_value}")
+            elif ret_value.startswith('%'):
+                reg = self.allocator.get_physical_reg(ret_value)
+                riscv_instructions.append(f"    mv a0, {reg}")
         
         # 函数返回
         riscv_instructions.append("    ret")
         return riscv_instructions
     
-    def _translate_load(self, instruction):
-        """翻译加载指令"""
+    def _translate_memory(self, instruction):
+        """翻译内存指令"""
         riscv_instructions = []
-        result_reg = instruction.result
-        src_ptr = instruction.operands[0]
-        data_type = instruction.types[0]
+        opcode = instruction.opcode
         
-        # 获取目标寄存器
-        dest_reg = self._get_physical_reg(result_reg)
+        # 内存分配
+        if opcode == 'alloca':
+            result_reg = instruction.result
+            data_type = self._get_data_type(instruction.types[0])
+            size = data_type.value // 8  # 字节大小
+            
+            # 更新栈偏移
+            self.allocator.stack_offset += size
+            stack_offset = self.allocator.stack_offset
+            
+            # 将栈地址保存到寄存器
+            dest_reg = self.allocator.allocate_register(result_reg, data_type)
+            riscv_instructions.append(f"    # Allocate {size} bytes on stack")
+            riscv_instructions.append(f"    addi {dest_reg}, sp, {stack_offset}")
         
-        # 获取源指针
-        src_reg = self._get_physical_reg(src_ptr)
+        # 加载指令
+        elif opcode == 'load':
+            result_reg = instruction.result
+            src_ptr = instruction.operands[0]
+            data_type = self._get_data_type(instruction.types[0])
+            
+            # 获取目标寄存器
+            is_float = data_type in [DataType.F32, DataType.F64]
+            dest_reg = self.allocator.allocate_register(result_reg, data_type, is_float)
+            
+            # 获取源指针
+            src_reg = self.allocator.get_physical_reg(src_ptr)
+            
+            # 根据数据类型选择加载指令
+            load_instr = ""
+            if data_type == DataType.I32:
+                load_instr = "lw"
+            elif data_type == DataType.I16:
+                load_instr = "lh"
+            elif data_type == DataType.I8:
+                load_instr = "lb"
+            elif data_type == DataType.F32:
+                load_instr = "flw"
+            elif data_type == DataType.F64:
+                load_instr = "fld"
+            else:
+                load_instr = "lw"  # 默认
+            
+            riscv_instructions.append(f"    {load_instr} {dest_reg}, 0({src_reg})")
         
-        # 根据数据类型选择加载指令
-        if data_type == 'i32':
-            riscv_instructions.append(f"    lw {dest_reg}, 0({src_reg})")
-        elif data_type == 'i16':
-            riscv_instructions.append(f"    lh {dest_reg}, 0({src_reg})")
-        elif data_type == 'i8':
-            riscv_instructions.append(f"    lb {dest_reg}, 0({src_reg})")
-        else:
-            riscv_instructions.append(f"    # UNSUPPORTED LOAD TYPE: {data_type}")
-        
-        return riscv_instructions
-    
-    def _translate_store(self, instruction):
-        """翻译存储指令"""
-        riscv_instructions = []
-        value = instruction.operands[0]
-        dest_ptr = instruction.operands[1]
-        data_type = instruction.types[0]
-        
-        # 获取目标指针
-        ptr_reg = self._get_physical_reg(dest_ptr)
-        
-        # 处理存储的值
-        if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
-            # 立即数，加载到临时寄存器
-            temp_reg = self._get_physical_reg(f"%temp_{len(self.reg_map)}")
-            riscv_instructions.append(f"    li {temp_reg}, {value}")
-            value_reg = temp_reg
-        elif value.startswith('%'):
-            # 从虚拟寄存器获取
-            value_reg = self._get_physical_reg(value)
-        else:
-            value_reg = value
-        
-        # 根据数据类型选择存储指令
-        if data_type == 'i32':
-            riscv_instructions.append(f"    sw {value_reg}, 0({ptr_reg})")
-        elif data_type == 'i16':
-            riscv_instructions.append(f"    sh {value_reg}, 0({ptr_reg})")
-        elif data_type == 'i8':
-            riscv_instructions.append(f"    sb {value_reg}, 0({ptr_reg})")
-        else:
-            riscv_instructions.append(f"    # UNSUPPORTED STORE TYPE: {data_type}")
-        
-        return riscv_instructions
-    
-    def _translate_alloca(self, instruction):
-        """翻译内存分配指令"""
-        riscv_instructions = []
-        result_reg = instruction.result
-        data_type = instruction.types[0]
-        
-        # 计算分配大小
-        if data_type == 'i32':
-            size = 4
-        elif data_type == 'i16':
-            size = 2
-        elif data_type == 'i8':
-            size = 1
-        else:
-            size = 4  # 默认为4字节
-        
-        # 更新栈偏移
-        self.stack_offset += size
-        stack_offset = self.stack_offset
-        
-        # 将栈地址保存到寄存器
-        dest_reg = self._get_physical_reg(result_reg)
-        riscv_instructions.append(f"    # Allocate {size} bytes on stack")
-        riscv_instructions.append(f"    addi {dest_reg}, sp, {stack_offset}")
+        # 存储指令
+        elif opcode == 'store':
+            value = instruction.operands[0]
+            dest_ptr = instruction.operands[1]
+            data_type = self._get_data_type(instruction.types[0])
+            
+            # 获取目标指针
+            ptr_reg = self.allocator.get_physical_reg(dest_ptr)
+            
+            # 处理存储的值
+            value_reg = None
+            if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                # 立即数，加载到临时寄存器
+                temp_reg = self.allocator.allocate_register(f"%temp_{len(self.allocator.reg_map)}", data_type)
+                riscv_instructions.append(f"    li {temp_reg}, {value}")
+                value_reg = temp_reg
+            elif value.startswith('%'):
+                # 从虚拟寄存器获取
+                value_reg = self.allocator.get_physical_reg(value)
+            
+            # 根据数据类型选择存储指令
+            store_instr = ""
+            if data_type == DataType.I32:
+                store_instr = "sw"
+            elif data_type == DataType.I16:
+                store_instr = "sh"
+            elif data_type == DataType.I8:
+                store_instr = "sb"
+            elif data_type == DataType.F32:
+                store_instr = "fsw"
+            elif data_type == DataType.F64:
+                store_instr = "fsd"
+            else:
+                store_instr = "sw"  # 默认
+            
+            if value_reg:
+                riscv_instructions.append(f"    {store_instr} {value_reg}, 0({ptr_reg})")
         
         return riscv_instructions
     
@@ -258,25 +392,41 @@ class LLVMIRTranslator:
         result = instruction.result
         op1 = instruction.operands[0]
         op2 = instruction.operands[1]
-        data_type = instruction.types[0]
+        data_type = self._get_data_type(instruction.types[0])
         
-        # 获取目标寄存器
-        dest_reg = self._get_physical_reg(result)
+        # 浮点运算
+        if op in self.float_ops:
+            is_float = True
+            dest_reg = self.allocator.allocate_register(result, data_type, is_float)
+            op1_reg = self.allocator.get_physical_reg(op1)
+            op2_reg = self.allocator.get_physical_reg(op2)
+            
+            riscv_instructions.append(f"    {self.float_ops[op]} {dest_reg}, {op1_reg}, {op2_reg}")
+            return riscv_instructions
+        
+        # 整数运算
+        is_float = False
+        dest_reg = self.allocator.allocate_register(result, data_type, is_float)
         
         # 处理操作数1
-        if op1.isdigit() or (op1.startswith('-') and op1[1:].isdigit()):
-            # 立即数，加载到临时寄存器
-            temp_reg1 = self._get_physical_reg(f"%temp1_{len(self.reg_map)}")
-            riscv_instructions.append(f"    li {temp_reg1}, {op1}")
-            op1_reg = temp_reg1
-        elif op1.startswith('%'):
-            op1_reg = self._get_physical_reg(op1)
+        if op1.startswith('%'):
+            op1_reg = self.allocator.get_physical_reg(op1)
+        elif op1.isdigit() or (op1.startswith('-') and op1[1:].isdigit()):
+            # 立即数优化
+            imm = int(op1)
+            if -2048 <= imm < 2048:
+                riscv_instructions.append(f"    li {dest_reg}, {imm}")
+                op1_reg = dest_reg
+            else:
+                op1_reg = self.allocator.allocate_register(f"%temp1_{len(self.allocator.reg_map)}", data_type)
+                riscv_instructions.append(f"    li {op1_reg}, {imm}")
         else:
             op1_reg = op1
         
         # 处理操作数2
-        if op2.isdigit() or (op2.startswith('-') and op2[1:].isdigit()):
-            # 如果是立即数，特殊处理
+        if op2.startswith('%'):
+            op2_reg = self.allocator.get_physical_reg(op2)
+        elif op2.isdigit() or (op2.startswith('-') and op2[1:].isdigit()):
             imm = int(op2)
             # 对于ADDI指令，立即数范围是-2048到2047
             if op in ['add', 'sub'] and -2048 <= imm <= 2047:
@@ -287,11 +437,8 @@ class LLVMIRTranslator:
                 return riscv_instructions
             else:
                 # 加载到临时寄存器
-                temp_reg2 = self._get_physical_reg(f"%temp2_{len(self.reg_map)}")
-                riscv_instructions.append(f"    li {temp_reg2}, {op2}")
-                op2_reg = temp_reg2
-        elif op2.startswith('%'):
-            op2_reg = self._get_physical_reg(op2)
+                op2_reg = self.allocator.allocate_register(f"%temp2_{len(self.allocator.reg_map)}", data_type)
+                riscv_instructions.append(f"    li {op2_reg}, {op2}")
         else:
             op2_reg = op2
         
@@ -320,13 +467,13 @@ class LLVMIRTranslator:
         result = instruction.result
         op1 = instruction.operands[0]
         op2 = instruction.operands[1]
+        data_type = self._get_data_type(instruction.types[0])
         
-        # 获取目标寄存器
-        dest_reg = self._get_physical_reg(result)
+        dest_reg = self.allocator.allocate_register(result, data_type)
         
         # 处理操作数1
         if op1.startswith('%'):
-            op1_reg = self._get_physical_reg(op1)
+            op1_reg = self.allocator.get_physical_reg(op1)
         else:
             op1_reg = op1
         
@@ -345,11 +492,10 @@ class LLVMIRTranslator:
                 return riscv_instructions
             else:
                 # 加载到临时寄存器
-                temp_reg2 = self._get_physical_reg(f"%temp2_{len(self.reg_map)}")
-                riscv_instructions.append(f"    li {temp_reg2}, {op2}")
-                op2_reg = temp_reg2
+                op2_reg = self.allocator.allocate_register(f"%temp2_{len(self.allocator.reg_map)}", data_type)
+                riscv_instructions.append(f"    li {op2_reg}, {op2}")
         elif op2.startswith('%'):
-            op2_reg = self._get_physical_reg(op2)
+            op2_reg = self.allocator.get_physical_reg(op2)
         else:
             op2_reg = op2
         
@@ -367,70 +513,84 @@ class LLVMIRTranslator:
         
         return riscv_instructions
     
-    def _translate_icmp(self, instruction):
+    def _translate_compare(self, instruction):
         """翻译比较指令"""
         riscv_instructions = []
-        cmp_type = instruction.types[1]  # 比较类型
+        cmp_type = instruction.types[1] if instruction.opcode == 'icmp' else instruction.types[0]
         result = instruction.result
         op1 = instruction.operands[0]
         op2 = instruction.operands[1]
+        is_float = instruction.opcode == 'fcmp'
         
         # 获取目标寄存器
-        dest_reg = self._get_physical_reg(result)
+        data_type = DataType.I32  # 比较结果是布尔值
+        dest_reg = self.allocator.allocate_register(result, data_type, is_float)
         
         # 处理操作数1
-        if op1.startswith('%'):
-            op1_reg = self._get_physical_reg(op1)
-        else:
-            op1_reg = op1
+        op1_reg = self.allocator.get_physical_reg(op1) if op1.startswith('%') else op1
         
         # 处理操作数2
-        if op2.isdigit() or (op2.startswith('-') and op2[1:].isdigit()):
-            # 加载到临时寄存器
-            temp_reg2 = self._get_physical_reg(f"%temp2_{len(self.reg_map)}")
-            riscv_instructions.append(f"    li {temp_reg2}, {op2}")
-            op2_reg = temp_reg2
-        elif op2.startswith('%'):
-            op2_reg = self._get_physical_reg(op2)
-        else:
-            op2_reg = op2
+        op2_reg = None
+        if op2.startswith('%'):
+            op2_reg = self.allocator.get_physical_reg(op2)
+        elif op2.isdigit() or (op2.startswith('-') and op2[1:].isdigit()):
+            # 整数比较
+            if not is_float:
+                imm = int(op2)
+                if -2048 <= imm <= 2047:
+                    op2_reg = imm
+                else:
+                    temp_reg = self.allocator.allocate_register(f"%temp_{len(self.allocator.reg_map)}", DataType.I32)
+                    riscv_instructions.append(f"    li {temp_reg}, {op2}")
+                    op2_reg = temp_reg
+            else:
+                # 浮点比较
+                temp_reg = self.allocator.allocate_register(f"%temp_{len(self.allocator.reg_map)}", DataType.F32, True)
+                riscv_instructions.append(f"    lui a0, {float(op2).hex()}")
+                riscv_instructions.append(f"    fmv.w.x {temp_reg}, a0")
+                op2_reg = temp_reg
         
-        # 映射比较类型
+        # 浮点比较
+        if is_float:
+            cmp_map = {
+                'oeq': 'feq.s',
+                'ogt': 'fgt.s',
+                'oge': 'fge.s',
+                'olt': 'flt.s',
+                'ole': 'fle.s',
+                'one': 'fne.s'
+            }
+            
+            if cmp_type in cmp_map:
+                riscv_instructions.append(f"    {cmp_map[cmp_type]} {dest_reg}, {op1_reg}, {op2_reg}")
+            else:
+                riscv_instructions.append(f"    # UNSUPPORTED FLOAT CMP: {cmp_type}")
+            return riscv_instructions
+        
+        # 整数比较
         cmp_map = {
-            'eq': ('beq', 'bne'),
-            'ne': ('bne', 'beq'),
-            'slt': ('slt', 'sge'),
-            'sge': ('sge', 'slt'),
-            'sgt': ('sgt', 'sle'),
-            'sle': ('sle', 'sgt'),
-            'ult': ('sltu', 'sgeu'),
-            'uge': ('sgeu', 'sltu'),
-            'ugt': ('sgtu', 'sleu'),
-            'ule': ('sleu', 'sgtu')
+            'eq': 'seqz',  # 使用序列优化
+            'ne': 'snez',
+            'slt': 'slt',
+            'sge': 'sgt',  # a >= b 等价于 b < a
+            'sgt': 'sgt',
+            'sle': 'slt',  # a <= b 等价于 b > a
+            'ult': 'sltu',
+            'uge': 'sgtu',
+            'ugt': 'sgtu',
+            'ule': 'sltu'
         }
         
         if cmp_type in cmp_map:
-            # 使用比较和分支指令实现
-            true_label = f".cmp_true_{len(self.label_map)}"
-            false_label = f".cmp_false_{len(self.label_map)}"
-            end_label = f".cmp_end_{len(self.label_map)}"
-            
-            # 比较操作
-            cmp_instr, cmp_inv = cmp_map[cmp_type]
-            riscv_instructions.append(f"    {cmp_instr} {op1_reg}, {op2_reg}, {true_label}")
-            riscv_instructions.append(f"    j {false_label}")
-            
-            # 真分支
-            riscv_instructions.append(f"{true_label}:")
-            riscv_instructions.append(f"    li {dest_reg}, 1")
-            riscv_instructions.append(f"    j {end_label}")
-            
-            # 假分支
-            riscv_instructions.append(f"{false_label}:")
-            riscv_instructions.append(f"    li {dest_reg}, 0")
-            
-            # 结束标签
-            riscv_instructions.append(f"{end_label}:")
+            # 使用RISC-V的set指令优化
+            if cmp_type in ['eq', 'ne']:
+                riscv_instructions.append(f"    xor {dest_reg}, {op1_reg}, {op2_reg}")
+                riscv_instructions.append(f"    {cmp_map[cmp_type]} {dest_reg}, {dest_reg}")
+            elif cmp_type in ['sge', 'sle']:
+                # 优化：a >= b 等价于 b <= a
+                riscv_instructions.append(f"    {cmp_map[cmp_type]} {dest_reg}, {op2_reg}, {op1_reg}")
+            else:
+                riscv_instructions.append(f"    {cmp_map[cmp_type]} {dest_reg}, {op1_reg}, {op2_reg}")
         else:
             riscv_instructions.append(f"    # UNSUPPORTED CMP TYPE: {cmp_type}")
         
@@ -447,7 +607,7 @@ class LLVMIRTranslator:
             false_label = instruction.operands[2]
             
             # 获取条件寄存器
-            cond_reg = self._get_physical_reg(cond)
+            cond_reg = self.allocator.get_physical_reg(cond)
             
             # 映射标签
             true_target = self.label_map.get(true_label, true_label)
@@ -474,30 +634,97 @@ class LLVMIRTranslator:
         
         # 保存调用者保存的寄存器
         riscv_instructions.append("    # Save caller-saved registers")
-        for i, reg in enumerate(self.temp_regs):
-            riscv_instructions.append(f"    sw {reg}, {4*i}(sp)")
+        for reg in self.allocator.temp_regs + self.allocator.float_regs:
+            if self.allocator.reg_in_use.get(reg, False):
+                temp_offset = self.allocator.stack_offset
+                self.allocator.stack_offset += 4
+                riscv_instructions.append(f"    sw {reg}, {temp_offset}(sp)")
         
         # 设置参数
         for i, arg in enumerate(args):
-            if i < len(self.param_regs):
+            if i < len(self.allocator.param_regs):
+                param_reg = self.allocator.param_regs[i]
                 if arg.startswith('%'):
-                    arg_reg = self._get_physical_reg(arg)
-                    riscv_instructions.append(f"    mv {self.param_regs[i]}, {arg_reg}")
+                    arg_reg = self.allocator.get_physical_reg(arg)
+                    riscv_instructions.append(f"    mv {param_reg}, {arg_reg}")
                 else:
-                    riscv_instructions.append(f"    li {self.param_regs[i]}, {arg}")
+                    riscv_instructions.append(f"    li {param_reg}, {arg}")
         
         # 函数调用
         riscv_instructions.append(f"    call {func_name}")
         
         # 恢复调用者保存的寄存器
         riscv_instructions.append("    # Restore caller-saved registers")
-        for i, reg in enumerate(self.temp_regs):
-            riscv_instructions.append(f"    lw {reg}, {4*i}(sp)")
+        for reg in reversed(self.allocator.temp_regs + self.allocator.float_regs):
+            if self.allocator.reg_in_use.get(reg, False):
+                temp_offset = self.allocator.stack_offset - 4
+                self.allocator.stack_offset -= 4
+                riscv_instructions.append(f"    lw {reg}, {temp_offset}(sp)")
         
         # 处理返回值
         if result:
-            dest_reg = self._get_physical_reg(result)
-            riscv_instructions.append(f"    mv {dest_reg}, a0")
+            data_type = self._get_data_type(instruction.types[0])
+            is_float = data_type in [DataType.F32, DataType.F64]
+            dest_reg = self.allocator.allocate_register(result, data_type, is_float)
+            
+            if is_float:
+                riscv_instructions.append(f"    fmv.s {dest_reg}, fa0")
+            else:
+                riscv_instructions.append(f"    mv {dest_reg}, a0")
+        
+        return riscv_instructions
+    
+    def _translate_cast(self, instruction):
+        """翻译类型转换指令"""
+        riscv_instructions = []
+        opcode = instruction.opcode
+        result = instruction.result
+        value = instruction.operands[0]
+        
+        # 获取源和目标类型
+        src_type = self._get_data_type(instruction.types[0])
+        dest_type = self._get_data_type(instruction.types[1]) if len(instruction.types) > 1 else src_type
+        
+        # 获取目标寄存器
+        is_float_dest = dest_type in [DataType.F32, DataType.F64]
+        dest_reg = self.allocator.allocate_register(result, dest_type, is_float_dest)
+        
+        # 获取源寄存器
+        is_float_src = src_type in [DataType.F32, DataType.F64]
+        value_reg = self.allocator.get_physical_reg(value) if value.startswith('%') else value
+        
+        # 整数到浮点
+        if opcode in ['sitofp', 'uitofp']:
+            if opcode == 'sitofp':
+                riscv_instructions.append(f"    fcvt.s.w {dest_reg}, {value_reg}")
+            else:
+                riscv_instructions.append(f"    fcvt.s.wu {dest_reg}, {value_reg}")
+        
+        # 浮点到整数
+        elif opcode in ['fptosi', 'fptoui']:
+            if opcode == 'fptosi':
+                riscv_instructions.append(f"    fcvt.w.s {dest_reg}, {value_reg}, rtz")
+            else:
+                riscv_instructions.append(f"    fcvt.wu.s {dest_reg}, {value_reg}, rtz")
+        
+        # 浮点精度转换
+        elif opcode == 'fptrunc':
+            riscv_instructions.append(f"    fcvt.s.d {dest_reg}, {value_reg}")
+        elif opcode == 'fpext':
+            riscv_instructions.append(f"    fcvt.d.s {dest_reg}, {value_reg}")
+        
+        # 整数截断
+        elif opcode == 'trunc':
+            # 通常只需移动寄存器，因为RISC-V寄存器是32位
+            riscv_instructions.append(f"    mv {dest_reg}, {value_reg}")
+        
+        # 整数扩展
+        elif opcode in ['zext', 'sext']:
+            if opcode == 'zext':
+                riscv_instructions.append(f"    andi {dest_reg}, {value_reg}, 0xFFFF")  # 16位示例
+            else:
+                riscv_instructions.append(f"    slli {dest_reg}, {value_reg}, 16")
+                riscv_instructions.append(f"    srai {dest_reg}, {dest_reg}, 16")
         
         return riscv_instructions
 
@@ -515,6 +742,8 @@ entry:
     br i1 %cmp, label %true_block, label %false_block
     
 true_block:
+    %f = sitofp i32 %sum to float
+    %f2 = fadd float %f, 1.5
     ret i32 1
     
 false_block:
@@ -522,7 +751,7 @@ false_block:
 }
 """
 
-    translator = LLVMIRTranslator()
+    translator = OptimizedLLVMIRTranslator()
     riscv_code = translator.translate(sample_ir)
     
     print("Generated RISC-V Assembly:")
