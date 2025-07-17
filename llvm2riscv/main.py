@@ -12,26 +12,13 @@ LLVM IR 到 RISC-V 汇编转换器主程序
 
 import sys
 import os
-from translator import LLVMIRTranslator
-
-def print_usage():
-    """打印使用帮助"""
-    print("使用方法:")
-    print("    python main.py <input_file.ll> <output_file.s>")
-    print()
-    print("参数:")
-    print("    input_file.ll   - 输入的 LLVM IR 文件")
-    print("    output_file.s   - 输出的 RISC-V 汇编文件")
-    print()
-    print("示例:")
-    print("    python main.py test.ll test.s")
+from translator import OptimizedLLVMIRTranslator as LLVMIRTranslator
 
 def main():
     """主函数"""
     # 检查命令行参数
     if len(sys.argv) != 3:
         print("错误: 参数数量不正确")
-        print_usage()
         sys.exit(1)
     
     input_file = sys.argv[1]
