@@ -16,6 +16,29 @@ llvm2riscv/
    - 调用register_allocator.py进行寄存器分配
    - 调用riscv_emitter.py生成RISC-V代码
 
+现在支持的RISC-V指令：
+
+内存管理类：
+
+>LB LBU LH LHU LW LWU LUI LWU SB SH SW
+
+算术类：
+
+>ADDI ADDIW ADD SUB SUBW AND OR XOR SLL SRL SRA
+
+移位类：
+
+>SLLI SRLI SRAI
+
+比较类：
+
+>SLTI SLTIU SLT SLTU
+
+跳转类：
+
+>JAL JALR BEQ BNE BLT BGE BLTU BGEU
+
+
 ### ir_parser.py
 
 实现了完整的LLVM IR解析器
