@@ -34,3 +34,11 @@ compiler
 .Trashes
 ehthumbs.db
 Thumbs.db 
+
+# 测试用的中间文件
+*.ll
+*.o
+*.s
+# Python cache files
+__pycache__/
+*.py[cod]

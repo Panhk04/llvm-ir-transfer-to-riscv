@@ -1,5 +1,6 @@
 import re
 from collections import namedtuple, defaultdict
+from ir_parsar import IRParser
 
 # 定义数据结构
 Function = namedtuple('Function', ['name', 'return_type', 'params', 'blocks'])
