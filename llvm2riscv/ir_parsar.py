@@ -93,10 +93,10 @@ class IRParser:
                 
             # 解析指令
             if current_func and current_block:
-                # 处理ret指令 - 支持无返回值的ret
+                # 处理ret指令 - 支持变量和立即数返回值
                 if line.startswith('ret'):
-                    # 改进ret指令解析，支持负数
-                    ret_match = re.match(r'ret\s+(\w+)\s+(-?\w+|-?\d+)', line)
+                    # 支持 ret i32 %var, ret i32 3, ret void 等格式
+                    ret_match = re.match(r'ret\s+(\w+)\s+(-?\%?[\w\d]+|-?\d+)', line)
                     if ret_match:
                         inst = Instruction(
                             opcode='ret',
@@ -131,8 +131,10 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理load指令 (例如: %1 = load i32, i32* %a)
-                load_match = re.match(r'(\%[\w\d]+)\s*=\s*load\s+(\w+),\s+(\w+\*)\s+(\%[\w\d]+)', line)
+                # 处理load指令 - 支持全局变量和局部变量
+                # 局部变量: %1 = load i32, i32* %a
+                # 全局变量: %1 = load i32, i32* @global_var
+                load_match = re.match(r'(\%[\w\d]+)\s*=\s*load\s+(\w+),\s+(\w+\*)\s+(\%[\w\d]+|@[\w\d_]+)', line)
                 if load_match:
                     inst = Instruction(
                         opcode='load',

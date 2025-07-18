@@ -15,8 +15,8 @@ class DataType(Enum):
     I16 = 16
     I32 = 32
     I64 = 64
-    F32 = 32.0
-    F64 = 64.0
+    F32 = 100  # 使用不同的值避免与整数类型冲突
+    F64 = 200
 
 # 寄存器分配器
 class RegisterAllocator:
@@ -74,6 +74,12 @@ class RegisterAllocator:
         """为虚拟寄存器分配物理寄存器"""
         if virtual_reg in self.reg_map:
             return self.reg_map[virtual_reg]
+        
+        # 强制检查数据类型，确保整数类型不会分配浮点寄存器
+        if data_type in [DataType.I1, DataType.I8, DataType.I16, DataType.I32, DataType.I64]:
+            is_float = False
+        elif data_type in [DataType.F32, DataType.F64]:
+            is_float = True
         
         # 优先尝试分配空闲寄存器
         reg_pool = self.float_regs if is_float else self.temp_regs
@@ -141,6 +147,26 @@ class OptimizedLLVMIRTranslator:
         declarations, functions = parser.parse(ir_code)
         
         riscv_code = []
+        
+        # 处理全局变量声明
+        global_vars = self._extract_global_variables(ir_code)
+        if global_vars:
+            riscv_code.append(".data")
+            for var_name, var_type, var_value in global_vars:
+                riscv_code.append(f".globl {var_name}")
+                riscv_code.append(f"{var_name}:")
+                if var_type == 'i32':
+                    riscv_code.append(f"    .word {var_value}")
+                elif var_type == 'i64':
+                    riscv_code.append(f"    .dword {var_value}")
+                elif var_type == 'float':
+                    riscv_code.append(f"    .float {var_value}")
+                elif var_type == 'double':
+                    riscv_code.append(f"    .double {var_value}")
+                else:
+                    riscv_code.append(f"    .word {var_value}")  # 默认
+            riscv_code.append("")  # 添加空行分隔
+        
         riscv_code.append(".text")
         
         # 检查是否有main函数并添加.globl指令
@@ -175,12 +201,27 @@ class OptimizedLLVMIRTranslator:
         """死代码删除优化"""
         # 收集活跃变量（被使用的变量）
         used_vars = set()
+        
+        # 首先收集所有在ret指令中使用的变量
         for block in function.blocks:
             for inst in block.instructions:
-                # 收集所有被使用的操作数
-                for op in inst.operands:
-                    if op and op.startswith('%'):
-                        used_vars.add(op)
+                if inst.opcode == 'ret' and inst.operands:
+                    for op in inst.operands:
+                        if op.startswith('%'):
+                            used_vars.add(op)
+        
+        # 反向传播：如果一个变量被使用，那么定义它的指令也是活跃的
+        changed = True
+        while changed:
+            changed = False
+            for block in function.blocks:
+                for inst in block.instructions:
+                    # 如果指令的结果被使用，那么其操作数也被使用
+                    if inst.result and inst.result in used_vars:
+                        for op in inst.operands:
+                            if op.startswith('%') and op not in used_vars:
+                                used_vars.add(op)
+                                changed = True
         
         # 标记活跃指令
         for block in function.blocks:
@@ -192,11 +233,12 @@ class OptimizedLLVMIRTranslator:
                 # 保留结果被使用的指令
                 elif inst.result and inst.result in used_vars:
                     new_insts.append(inst)
-                # 其他情况视为死代码，不保留
-                else:
-                    # 如果指令有副作用但不在列表中，保留它（安全做法）
-                    if inst.opcode in ['load', 'alloca']:
-                        new_insts.append(inst)
+                # 保留所有内存分配指令（安全做法）
+                elif inst.opcode in ['alloca']:
+                    new_insts.append(inst)
+                # 保留所有从全局变量的加载指令
+                elif inst.opcode == 'load' and any(op.startswith('@') for op in inst.operands):
+                    new_insts.append(inst)
             block.instructions = new_insts
     
     def _constant_folding(self, function):
@@ -514,29 +556,55 @@ class OptimizedLLVMIRTranslator:
             src_ptr = instruction.operands[0]
             data_type = self._get_data_type(instruction.types[0])
             
-            # 获取目标寄存器
+            # 根据数据类型确定是否为浮点
             is_float = data_type in [DataType.F32, DataType.F64]
             dest_reg = self.allocator.allocate_register(result_reg, data_type, is_float)
             
-            # 获取源指针
-            src_reg = self.allocator.get_physical_reg(src_ptr)
-            
-            # 根据数据类型选择加载指令
-            load_instr = ""
-            if data_type == DataType.I32:
-                load_instr = "lw"
-            elif data_type == DataType.I16:
-                load_instr = "lh"
-            elif data_type == DataType.I8:
-                load_instr = "lb"
-            elif data_type == DataType.F32:
-                load_instr = "flw"
-            elif data_type == DataType.F64:
-                load_instr = "fld"
+            # 处理全局变量访问
+            if src_ptr.startswith('@'):
+                # 全局变量访问
+                global_name = src_ptr[1:]  # 去掉@前缀
+                riscv_instructions.append(f"    # Load from global variable {global_name}")
+                riscv_instructions.append(f"    lui {dest_reg}, %hi({global_name})")
+                
+                # 根据数据类型选择正确的加载指令
+                if data_type == DataType.F32:
+                    load_instr = "flw"
+                elif data_type == DataType.F64:
+                    load_instr = "fld"
+                elif data_type == DataType.I32:
+                    load_instr = "lw"
+                elif data_type == DataType.I16:
+                    load_instr = "lh"
+                elif data_type == DataType.I8:
+                    load_instr = "lb"
+                elif data_type == DataType.I64:
+                    load_instr = "ld"
+                else:
+                    load_instr = "lw"  # 默认整数加载
+                
+                riscv_instructions.append(f"    {load_instr} {dest_reg}, %lo({global_name})({dest_reg})")
             else:
-                load_instr = "lw"  # 默认
-            
-            riscv_instructions.append(f"    {load_instr} {dest_reg}, 0({src_reg})")
+                # 局部变量访问
+                src_reg = self.allocator.get_physical_reg(src_ptr)
+                
+                # 根据数据类型选择正确的加载指令
+                if data_type == DataType.F32:
+                    load_instr = "flw"
+                elif data_type == DataType.F64:
+                    load_instr = "fld"
+                elif data_type == DataType.I32:
+                    load_instr = "lw"
+                elif data_type == DataType.I16:
+                    load_instr = "lh"
+                elif data_type == DataType.I8:
+                    load_instr = "lb"
+                elif data_type == DataType.I64:
+                    load_instr = "ld"
+                else:
+                    load_instr = "lw"  # 默认整数加载
+                
+                riscv_instructions.append(f"    {load_instr} {dest_reg}, 0({src_reg})")
         
         # 存储指令
         elif opcode == 'store':
@@ -920,6 +988,23 @@ class OptimizedLLVMIRTranslator:
                 riscv_instructions.append(f"    srai {dest_reg}, {dest_reg}, 16")
         
         return riscv_instructions
+    
+    def _extract_global_variables(self, ir_code):
+        """从LLVM IR代码中提取全局变量声明"""
+        global_vars = []
+        lines = ir_code.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            # 匹配全局变量声明: @g_b = dso_local global i32 3
+            global_match = re.match(r'@(\w+)\s*=\s*(?:dso_local\s+)?global\s+(\w+)\s+(.+)', line)
+            if global_match:
+                var_name = global_match.group(1)
+                var_type = global_match.group(2)
+                var_value = global_match.group(3)
+                global_vars.append((var_name, var_type, var_value))
+        
+        return global_vars
 
 # 使用示例
 if __name__ == "__main__":

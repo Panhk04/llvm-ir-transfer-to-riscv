@@ -237,9 +237,9 @@ show_test_summary() {
             if [ -f "$test_dir/${test_case}.in" ]; then
                 echo "│   ├── ${test_case}.in        # Input data"
             fi
-            echo "│   ├── ${test_name}.ll        # Generated LLVM IR"
-            echo "│   ├── ${test_name}.s         # Generated RISC-V assembly"
-            echo "│   ├── ${test_name}_riscv     # RISC-V executable"
+            echo "│   ├── ${test_case}.ll        # Generated LLVM IR"
+            echo "│   ├── ${test_case}.s         # Generated RISC-V assembly"
+            echo "│   ├── ${test_case}_riscv     # RISC-V executable"
             echo "│   ├── raw_output.txt     # Program raw output"
             echo "│   ├── actual_output.txt  # Combined output(stdout+exitcode)"
             echo "│   ├── compile.log        # Compilation log"
