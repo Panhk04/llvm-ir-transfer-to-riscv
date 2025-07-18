@@ -320,6 +320,62 @@ ret void
    - 处理函数调用和返回
    - 包含详细的测试用例
 
+#### 2.7.2 核心代码分析
+
+``` python
+def allocate_register(self, virtual_reg, data_type, is_float=False):
+    """为虚拟寄存器分配物理寄存器"""
+    if virtual_reg in self.reg_map:
+        return self.reg_map[virtual_reg]
+    
+    # 强制检查数据类型，确保整数类型不会分配浮点寄存器
+    if data_type in [DataType.I1, DataType.I8, DataType.I16, DataType.I32, DataType.I64]:
+        is_float = False
+    elif data_type in [DataType.F32, DataType.F64]:
+        is_float = True
+    
+    # 优先尝试分配空闲寄存器，但排除s0（帧指针）
+    if is_float:
+        reg_pool = self.float_regs
+    else:
+        # 从temp_regs和saved_regs中排除s0
+        available_temp_regs = [reg for reg in self.temp_regs if reg != 's0']
+        available_saved_regs = [reg for reg in self.saved_regs if reg != 's0']
+        reg_pool = available_temp_regs + available_saved_regs
+    
+    for reg in reg_pool:
+        if not self.reg_in_use[reg]:
+            self.reg_map[virtual_reg] = reg
+            self.reg_in_use[reg] = True
+            return reg
+    
+    # 寄存器不足，溢出到栈
+    if is_float:
+        size = 4 if data_type == DataType.F32 else 8
+    else:
+        size = 4  # 默认4字节
+    
+    if virtual_reg not in self.stack_frame:
+        # 为临时变量分配栈空间时，要避免与保留区域冲突
+        self.temp_stack_offset += size
+        # 确保栈对齐（4字节对齐）
+        if self.temp_stack_offset % 4 != 0:
+            self.temp_stack_offset = (self.temp_stack_offset + 3) // 4 * 4
+        
+        # 检查是否会与保留区域冲突
+        if hasattr(self, 'reserved_stack_top') and self.temp_stack_offset > self.reserved_stack_top - 32:
+            # 如果接近保留区域，调整偏移
+            self.temp_stack_offset = max(self.stack_offset + 100, self.temp_stack_offset)
+        
+        self.stack_frame[virtual_reg] = self.temp_stack_offset
+    
+    return f"{self.stack_frame[virtual_reg]}(sp)"
+```
+
+allocate_register方法用于为虚拟寄存器分配物理寄存器。首先检查虚拟寄存器是否已经分配了物理寄存器，如果是则直接返回。然后根据数据类型选择合适的寄存器池（浮点或整数），优先尝试分配空闲寄存器（排除s0帧指针）。如果没有可用的寄存器，则将数据溢出到栈上，为其分配栈空间并返回栈位置。
+
+这样就较为简单的实现了一个合理的寄存器分配方案，当然较现代riscv汇编优化后的成果还要较大差距。
+
 ### 2.8 riscv_emitter.py
 
 #### 2.8.1 功能描述
@@ -356,7 +412,12 @@ ret void
 
 ## 4.1 实验结果
 
-本项目通过了前置项目中给出的所有测试用例。
+本项目目前通过了00~03测试点以及05测试点。
+
+目前存在的问题：
+存在多维数组时会出现段错误。这导致了04和后续部分测试点无法通过。
+
+此外我们也没并没有实现全部的risc-v64指令支持，以及完备得优化技术。这使得对于复杂代码的转化结果可能不够优秀。
 
 ## 5.1 小组成员分工
 
