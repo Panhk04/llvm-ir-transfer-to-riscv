@@ -143,10 +143,11 @@ class OptimizedLLVMIRTranslator:
         riscv_code = []
         riscv_code.append(".text")
         
-        # 处理函数声明
-        for decl in declarations:
-            if '@main' in decl:
+        # 检查是否有main函数并添加.globl指令
+        for func in functions:
+            if func.name == 'main':
                 riscv_code.append(".globl main")
+                break
         
         # 构建标签映射
         self._build_label_map(functions)
