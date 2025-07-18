@@ -501,7 +501,13 @@ class OptimizedLLVMIRTranslator:
                 # 从虚拟寄存器加载
                 reg = self.allocator.get_physical_reg(ret_value)
                 if reg:
-                    riscv_instructions.append(f"    mv a0, {reg}")
+                    # 检查是否在栈上
+                    if '(sp)' in reg:
+                        # 从栈加载到a0
+                        riscv_instructions.append(f"    lw a0, {reg}")
+                    else:
+                        # 从寄存器移动到a0
+                        riscv_instructions.append(f"    mv a0, {reg}")
                 else:
                     # 如果寄存器映射不存在，直接使用立即数
                     riscv_instructions.append(f"    li a0, {ret_value}")
@@ -524,7 +530,14 @@ class OptimizedLLVMIRTranslator:
                 # 从虚拟寄存器加载
                 reg = self.allocator.get_physical_reg(ret_value)
                 if reg:
-                    riscv_instructions.append(f"    fmv.s fa0, {reg}")
+                    # 检查是否在栈上
+                    if '(sp)' in reg:
+                        # 从栈加载到fa0
+                        load_instr = "flw" if ret_type == DataType.F32 else "fld"
+                        riscv_instructions.append(f"    {load_instr} fa0, {reg}")
+                    else:
+                        # 从寄存器移动到fa0
+                        riscv_instructions.append(f"    fmv.s fa0, {reg}")
         
         # 函数返回
         riscv_instructions.append("    ret")
@@ -558,53 +571,101 @@ class OptimizedLLVMIRTranslator:
             
             # 根据数据类型确定是否为浮点
             is_float = data_type in [DataType.F32, DataType.F64]
-            dest_reg = self.allocator.allocate_register(result_reg, data_type, is_float)
+            dest_reg_or_stack = self.allocator.allocate_register(result_reg, data_type, is_float)
             
             # 处理全局变量访问
             if src_ptr.startswith('@'):
                 # 全局变量访问
                 global_name = src_ptr[1:]  # 去掉@前缀
                 riscv_instructions.append(f"    # Load from global variable {global_name}")
-                riscv_instructions.append(f"    lui {dest_reg}, %hi({global_name})")
                 
-                # 根据数据类型选择正确的加载指令
-                if data_type == DataType.F32:
-                    load_instr = "flw"
-                elif data_type == DataType.F64:
-                    load_instr = "fld"
-                elif data_type == DataType.I32:
-                    load_instr = "lw"
-                elif data_type == DataType.I16:
-                    load_instr = "lh"
-                elif data_type == DataType.I8:
-                    load_instr = "lb"
-                elif data_type == DataType.I64:
-                    load_instr = "ld"
+                # 如果目标是栈位置，使用临时寄存器
+                if '(sp)' in dest_reg_or_stack:
+                    temp_reg = self._get_temp_register()
+                    riscv_instructions.append(f"    lui {temp_reg}, %hi({global_name})")
+                    
+                    # 根据数据类型选择正确的加载指令
+                    if data_type == DataType.F32:
+                        load_instr = "flw"
+                    elif data_type == DataType.F64:
+                        load_instr = "fld"
+                    elif data_type == DataType.I32:
+                        load_instr = "lw"
+                    elif data_type == DataType.I16:
+                        load_instr = "lh"
+                    elif data_type == DataType.I8:
+                        load_instr = "lb"
+                    elif data_type == DataType.I64:
+                        load_instr = "ld"
+                    else:
+                        load_instr = "lw"  # 默认整数加载
+                    
+                    riscv_instructions.append(f"    {load_instr} {temp_reg}, %lo({global_name})({temp_reg})")
+                    self._store_to_stack_if_needed(temp_reg, dest_reg_or_stack, data_type, riscv_instructions)
                 else:
-                    load_instr = "lw"  # 默认整数加载
-                
-                riscv_instructions.append(f"    {load_instr} {dest_reg}, %lo({global_name})({dest_reg})")
+                    riscv_instructions.append(f"    lui {dest_reg_or_stack}, %hi({global_name})")
+                    
+                    # 根据数据类型选择正确的加载指令
+                    if data_type == DataType.F32:
+                        load_instr = "flw"
+                    elif data_type == DataType.F64:
+                        load_instr = "fld"
+                    elif data_type == DataType.I32:
+                        load_instr = "lw"
+                    elif data_type == DataType.I16:
+                        load_instr = "lh"
+                    elif data_type == DataType.I8:
+                        load_instr = "lb"
+                    elif data_type == DataType.I64:
+                        load_instr = "ld"
+                    else:
+                        load_instr = "lw"  # 默认整数加载
+                    
+                    riscv_instructions.append(f"    {load_instr} {dest_reg_or_stack}, %lo({global_name})({dest_reg_or_stack})")
             else:
                 # 局部变量访问
                 src_reg = self.allocator.get_physical_reg(src_ptr)
                 
-                # 根据数据类型选择正确的加载指令
-                if data_type == DataType.F32:
-                    load_instr = "flw"
-                elif data_type == DataType.F64:
-                    load_instr = "fld"
-                elif data_type == DataType.I32:
-                    load_instr = "lw"
-                elif data_type == DataType.I16:
-                    load_instr = "lh"
-                elif data_type == DataType.I8:
-                    load_instr = "lb"
-                elif data_type == DataType.I64:
-                    load_instr = "ld"
+                # 如果目标是栈位置，使用临时寄存器进行加载
+                if '(sp)' in dest_reg_or_stack:
+                    temp_reg = self._get_temp_register()
+                    
+                    # 根据数据类型选择正确的加载指令
+                    if data_type == DataType.F32:
+                        load_instr = "flw"
+                    elif data_type == DataType.F64:
+                        load_instr = "fld"
+                    elif data_type == DataType.I32:
+                        load_instr = "lw"
+                    elif data_type == DataType.I16:
+                        load_instr = "lh"
+                    elif data_type == DataType.I8:
+                        load_instr = "lb"
+                    elif data_type == DataType.I64:
+                        load_instr = "ld"
+                    else:
+                        load_instr = "lw"  # 默认整数加载
+                    
+                    riscv_instructions.append(f"    {load_instr} {temp_reg}, 0({src_reg})")
+                    self._store_to_stack_if_needed(temp_reg, dest_reg_or_stack, data_type, riscv_instructions)
                 else:
-                    load_instr = "lw"  # 默认整数加载
-                
-                riscv_instructions.append(f"    {load_instr} {dest_reg}, 0({src_reg})")
+                    # 根据数据类型选择正确的加载指令
+                    if data_type == DataType.F32:
+                        load_instr = "flw"
+                    elif data_type == DataType.F64:
+                        load_instr = "fld"
+                    elif data_type == DataType.I32:
+                        load_instr = "lw"
+                    elif data_type == DataType.I16:
+                        load_instr = "lh"
+                    elif data_type == DataType.I8:
+                        load_instr = "lb"
+                    elif data_type == DataType.I64:
+                        load_instr = "ld"
+                    else:
+                        load_instr = "lw"  # 默认整数加载
+                    
+                    riscv_instructions.append(f"    {load_instr} {dest_reg_or_stack}, 0({src_reg})")
         
         # 存储指令
         elif opcode == 'store':
@@ -658,55 +719,54 @@ class OptimizedLLVMIRTranslator:
         # 浮点运算
         if op in self.float_ops:
             is_float = True
-            dest_reg = self.allocator.allocate_register(result, data_type, is_float)
-            op1_reg = self.allocator.get_physical_reg(op1)
-            op2_reg = self.allocator.get_physical_reg(op2)
+            dest_reg_or_stack = self.allocator.allocate_register(result, data_type, is_float)
             
-            riscv_instructions.append(f"    {self.float_ops[op]} {dest_reg}, {op1_reg}, {op2_reg}")
+            # 获取操作数寄存器，处理栈溢出情况
+            op1_reg = self._get_or_load_operand(op1, data_type, riscv_instructions)
+            op2_reg = self._get_or_load_operand(op2, data_type, riscv_instructions)
+            
+            # 如果目标是栈位置，使用临时寄存器进行计算
+            if '(sp)' in dest_reg_or_stack:
+                temp_reg = self._get_temp_register()
+                riscv_instructions.append(f"    {self.float_ops[op]} {temp_reg}, {op1_reg}, {op2_reg}")
+                self._store_to_stack_if_needed(temp_reg, dest_reg_or_stack, data_type, riscv_instructions)
+            else:
+                riscv_instructions.append(f"    {self.float_ops[op]} {dest_reg_or_stack}, {op1_reg}, {op2_reg}")
             return riscv_instructions
         
         # 整数运算
         is_float = False
-        dest_reg = self.allocator.allocate_register(result, data_type, is_float)
+        dest_reg_or_stack = self.allocator.allocate_register(result, data_type, is_float)
         
         # 处理操作数1
-        if op1.startswith('%'):
-            op1_reg = self.allocator.get_physical_reg(op1)
-        elif op1.isdigit() or (op1.startswith('-') and op1[1:].isdigit()):
-            # 立即数优化
-            imm = int(op1)
-            if -2048 <= imm < 2048:
-                riscv_instructions.append(f"    li {dest_reg}, {imm}")
-                op1_reg = dest_reg
-            else:
-                op1_reg = self.allocator.allocate_register(f"%temp1_{len(self.allocator.reg_map)}", data_type)
-                riscv_instructions.append(f"    li {op1_reg}, {imm}")
-        else:
-            op1_reg = op1
+        op1_reg = self._get_or_load_operand(op1, data_type, riscv_instructions)
         
-        # 处理操作数2
-        if op2.startswith('%'):
-            op2_reg = self.allocator.get_physical_reg(op2)
-        elif op2.isdigit() or (op2.startswith('-') and op2[1:].isdigit()):
+        # 处理操作数2 - 特殊处理立即数优化
+        if op2.isdigit() or (op2.startswith('-') and op2[1:].isdigit()):
             imm = int(op2)
             # 对于ADDI指令，立即数范围是-2048到2047
             if op in ['add', 'sub'] and -2048 <= imm <= 2047:
-                if op == 'add':
-                    riscv_instructions.append(f"    addi {dest_reg}, {op1_reg}, {imm}")
-                else:  # sub
-                    riscv_instructions.append(f"    addi {dest_reg}, {op1_reg}, {-imm}")
+                if '(sp)' in dest_reg_or_stack:
+                    temp_reg = self._get_temp_register()
+                    if op == 'add':
+                        riscv_instructions.append(f"    addi {temp_reg}, {op1_reg}, {imm}")
+                    else:  # sub
+                        riscv_instructions.append(f"    addi {temp_reg}, {op1_reg}, {-imm}")
+                    self._store_to_stack_if_needed(temp_reg, dest_reg_or_stack, data_type, riscv_instructions)
+                else:
+                    if op == 'add':
+                        riscv_instructions.append(f"    addi {dest_reg_or_stack}, {op1_reg}, {imm}")
+                    else:  # sub
+                        riscv_instructions.append(f"    addi {dest_reg_or_stack}, {op1_reg}, {-imm}")
                 return riscv_instructions
-            else:
-                # 加载到临时寄存器
-                op2_reg = self.allocator.allocate_register(f"%temp2_{len(self.allocator.reg_map)}", data_type)
-                riscv_instructions.append(f"    li {op2_reg}, {op2}")
-        else:
-            op2_reg = op2
+        
+        # 获取第二个操作数
+        op2_reg = self._get_or_load_operand(op2, data_type, riscv_instructions)
         
         # 映射指令
         op_map = {
             'add': 'add',
-            'sub': 'sub',
+            'sub': 'sub', 
             'mul': 'mul',
             'sdiv': 'div',
             'and': 'and',
@@ -715,7 +775,13 @@ class OptimizedLLVMIRTranslator:
         }
         
         if op in op_map:
-            riscv_instructions.append(f"    {op_map[op]} {dest_reg}, {op1_reg}, {op2_reg}")
+            # 如果目标是栈位置，使用临时寄存器进行计算
+            if '(sp)' in dest_reg_or_stack:
+                temp_reg = self._get_temp_register()
+                riscv_instructions.append(f"    {op_map[op]} {temp_reg}, {op1_reg}, {op2_reg}")
+                self._store_to_stack_if_needed(temp_reg, dest_reg_or_stack, data_type, riscv_instructions)
+            else:
+                riscv_instructions.append(f"    {op_map[op]} {dest_reg_or_stack}, {op1_reg}, {op2_reg}")
         else:
             riscv_instructions.append(f"    # UNSUPPORTED ARITHMETIC: {op}")
         
@@ -1005,6 +1071,48 @@ class OptimizedLLVMIRTranslator:
                 global_vars.append((var_name, var_type, var_value))
         
         return global_vars
+
+    def _get_or_load_operand(self, operand, data_type, riscv_instructions):
+        """获取操作数对应的寄存器，如果操作数在栈上则先加载到临时寄存器"""
+        if operand.startswith('%'):
+            # 虚拟寄存器
+            reg = self.allocator.get_physical_reg(operand)
+            if reg and '(sp)' in reg:
+                # 变量在栈上，需要加载到临时寄存器
+                temp_reg = self._get_temp_register()
+                if data_type in [DataType.F32, DataType.F64]:
+                    load_instr = "flw" if data_type == DataType.F32 else "fld"
+                else:
+                    load_instr = "lw"
+                riscv_instructions.append(f"    {load_instr} {temp_reg}, {reg}")
+                return temp_reg
+            return reg
+        elif operand.isdigit() or (operand.startswith('-') and operand[1:].isdigit()):
+            # 立即数，加载到临时寄存器
+            temp_reg = self._get_temp_register()
+            riscv_instructions.append(f"    li {temp_reg}, {operand}")
+            return temp_reg
+        else:
+            return operand
+    
+    def _get_temp_register(self):
+        """获取一个临时寄存器"""
+        # 简单实现：使用可用的临时寄存器
+        for reg in ['t6', 's0', 's1', 's2']:
+            if not self.allocator.reg_in_use.get(reg, False):
+                return reg
+        return 't6'  # 如果都被使用，使用t6作为备用
+    
+    def _store_to_stack_if_needed(self, result_reg, stack_location, data_type, riscv_instructions):
+        """如果目标是栈位置，将寄存器值存储到栈上"""
+        if '(sp)' in stack_location:
+            if data_type in [DataType.F32, DataType.F64]:
+                store_instr = "fsw" if data_type == DataType.F32 else "fsd"
+            else:
+                store_instr = "sw"
+            riscv_instructions.append(f"    {store_instr} {result_reg}, {stack_location}")
+            return True
+        return False
 
 # 使用示例
 if __name__ == "__main__":
