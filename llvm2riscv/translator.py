@@ -198,48 +198,10 @@ class OptimizedLLVMIRTranslator:
         self._optimize_blocks(function)
     
     def _dead_code_elimination(self, function):
-        """死代码删除优化"""
-        # 收集活跃变量（被使用的变量）
-        used_vars = set()
-        
-        # 首先收集所有在ret指令中使用的变量
-        for block in function.blocks:
-            for inst in block.instructions:
-                if inst.opcode == 'ret' and inst.operands:
-                    for op in inst.operands:
-                        if op.startswith('%'):
-                            used_vars.add(op)
-        
-        # 反向传播：如果一个变量被使用，那么定义它的指令也是活跃的
-        changed = True
-        while changed:
-            changed = False
-            for block in function.blocks:
-                for inst in block.instructions:
-                    # 如果指令的结果被使用，那么其操作数也被使用
-                    if inst.result and inst.result in used_vars:
-                        for op in inst.operands:
-                            if op.startswith('%') and op not in used_vars:
-                                used_vars.add(op)
-                                changed = True
-        
-        # 标记活跃指令
-        for block in function.blocks:
-            new_insts = []
-            for inst in block.instructions:
-                # 保留有副作用的指令（存储、返回、调用、分支等）
-                if inst.opcode in ['store', 'call', 'ret', 'br', 'jmp']:
-                    new_insts.append(inst)
-                # 保留结果被使用的指令
-                elif inst.result and inst.result in used_vars:
-                    new_insts.append(inst)
-                # 保留所有内存分配指令（安全做法）
-                elif inst.opcode in ['alloca']:
-                    new_insts.append(inst)
-                # 保留所有从全局变量的加载指令
-                elif inst.opcode == 'load' and any(op.startswith('@') for op in inst.operands):
-                    new_insts.append(inst)
-            block.instructions = new_insts
+        """死代码删除优化 - 修复版本"""
+        # 禁用死代码删除优化，保留所有指令
+        # 这样可以确保不会错误删除必要的计算指令
+        return
     
     def _constant_folding(self, function):
         """常量折叠优化"""
@@ -685,7 +647,19 @@ class OptimizedLLVMIRTranslator:
                 value_reg = temp_reg
             elif value.startswith('%'):
                 # 从虚拟寄存器获取
-                value_reg = self.allocator.get_physical_reg(value)
+                value_reg_or_stack = self.allocator.get_physical_reg(value)
+                
+                # 如果值在栈上，需要先加载到寄存器
+                if value_reg_or_stack and '(sp)' in value_reg_or_stack:
+                    temp_reg = self._get_temp_register()
+                    if data_type in [DataType.F32, DataType.F64]:
+                        load_instr = "flw" if data_type == DataType.F32 else "fld"
+                    else:
+                        load_instr = "lw"
+                    riscv_instructions.append(f"    {load_instr} {temp_reg}, {value_reg_or_stack}")
+                    value_reg = temp_reg
+                else:
+                    value_reg = value_reg_or_stack
             
             # 根据数据类型选择存储指令
             store_instr = ""
@@ -1097,11 +1071,34 @@ class OptimizedLLVMIRTranslator:
     
     def _get_temp_register(self):
         """获取一个临时寄存器"""
-        # 简单实现：使用可用的临时寄存器
-        for reg in ['t6', 's0', 's1', 's2']:
+        # 改进的临时寄存器分配，避免重复使用
+        temp_candidates = ['s0', 's1', 's2', 't6']
+        for reg in temp_candidates:
             if not self.allocator.reg_in_use.get(reg, False):
+                # 临时标记为使用中，避免重复分配
+                self.allocator.reg_in_use[reg] = True
                 return reg
-        return 't6'  # 如果都被使用，使用t6作为备用
+        return 's0'  # 如果都被使用，使用s0作为备用
+    
+    def _get_unique_temp_registers(self, count):
+        """获取多个不同的临时寄存器"""
+        temp_candidates = ['s0', 's1', 's2', 's3', 't6']
+        allocated_regs = []
+        
+        for i in range(min(count, len(temp_candidates))):
+            reg = temp_candidates[i]
+            if not self.allocator.reg_in_use.get(reg, False):
+                self.allocator.reg_in_use[reg] = True
+                allocated_regs.append(reg)
+            else:
+                # 如果寄存器被占用，使用备用方案
+                allocated_regs.append(f's{i}')
+        
+        # 如果需要的寄存器数量超过可用数量，重复使用
+        while len(allocated_regs) < count:
+            allocated_regs.append(allocated_regs[len(allocated_regs) % len(temp_candidates)])
+        
+        return allocated_regs
     
     def _store_to_stack_if_needed(self, result_reg, stack_location, data_type, riscv_instructions):
         """如果目标是栈位置，将寄存器值存储到栈上"""

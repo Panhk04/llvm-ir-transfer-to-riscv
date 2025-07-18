@@ -324,11 +324,11 @@ echo
 show_test_summary
 
 # Show directory contents
-echo "=== test_results/ Directory Details ==="
-find test_results -type f | sort | while read file; do
-    size=$(wc -c < "$file" 2>/dev/null || echo "0")
-    printf "%-40s %8s bytes\n" "$file" "$size"
-done
+# echo "=== test_results/ Directory Details ==="
+# find test_results -type f | sort | while read file; do
+#     size=$(wc -c < "$file" 2>/dev/null || echo "0")
+#     printf "%-40s %8s bytes\n" "$file" "$size"
+# done
 
 if [ $failed -eq 0 ]; then
     echo
