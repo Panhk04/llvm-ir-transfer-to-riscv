@@ -93,6 +93,39 @@ class IRParser:
                 
             # 解析指令
             if current_func and current_block:
+                # 处理getelementptr指令 - 移到最前面，优先处理
+                if 'getelementptr' in line and '=' in line:
+                    result_var = line.split('=')[0].strip()
+                    
+                    # 直接在原始行中查找关键信息
+                    # 查找所有指针变量（%开头的）
+                    ptr_vars = re.findall(r'(\%[\w\d]+)', line)
+                    # 查找所有索引（i32 数字）
+                    indices = re.findall(r'i32\s+(-?\d+)', line)
+                    
+                    if len(ptr_vars) >= 2:  # 至少有结果变量和基础指针
+                        base_ptr = ptr_vars[1]  # 第二个是基础指针，第一个是结果变量
+                        
+                        # 简单的类型推断
+                        if '[' in line and 'x' in line:
+                            # 多维数组类型
+                            array_type_match = re.search(r'\[([^\]]+)\]', line)
+                            base_type = array_type_match.group(0) if array_type_match else 'array'
+                            ptr_type = base_type
+                        else:
+                            # 简单指针类型
+                            base_type = 'i32'
+                            ptr_type = 'i32*'
+                        
+                        inst = Instruction(
+                            opcode='getelementptr',
+                            operands=[base_ptr] + indices,
+                            result=result_var,
+                            types=[base_type, ptr_type]
+                        )
+                        current_block.instructions.append(inst)
+                        continue
+                
                 # 处理ret指令 - 支持变量和立即数返回值
                 if line.startswith('ret'):
                     # 支持 ret i32 %var, ret i32 3, ret void 等格式
