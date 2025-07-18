@@ -93,38 +93,58 @@ class IRParser:
                 
             # 解析指令
             if current_func and current_block:
-                # 处理getelementptr指令 - 移到最前面，优先处理
+                # 处理getelementptr指令 - 完全重写以正确解析两种模式
                 if 'getelementptr' in line and '=' in line:
                     result_var = line.split('=')[0].strip()
                     
-                    # 直接在原始行中查找关键信息
-                    # 查找所有指针变量（%开头的）
-                    ptr_vars = re.findall(r'(\%[\w\d]+)', line)
-                    # 查找所有索引（i32 数字）
-                    indices = re.findall(r'i32\s+(-?\d+)', line)
+                    # 解析getelementptr的完整语法
+                    # 模式1: getelementptr [4 x [2 x i32]], [4 x [2 x i32]]* %ptr, i32 0, i32 row, i32 col
+                    # 模式2: getelementptr i32, i32* %ptr, i32 offset
                     
-                    if len(ptr_vars) >= 2:  # 至少有结果变量和基础指针
-                        base_ptr = ptr_vars[1]  # 第二个是基础指针，第一个是结果变量
+                    # 查找基础指针（%开头的变量）
+                    ptr_vars = re.findall(r'(\%[\w\d]+)', line)
+                    if len(ptr_vars) < 2:  # 至少需要结果变量和基础指针
+                        continue
                         
-                        # 简单的类型推断
-                        if '[' in line and 'x' in line:
-                            # 多维数组类型
-                            array_type_match = re.search(r'\[([^\]]+)\]', line)
-                            base_type = array_type_match.group(0) if array_type_match else 'array'
-                            ptr_type = base_type
+                    base_ptr = ptr_vars[1]  # 第二个是基础指针
+                    
+                    # 判断是哪种模式
+                    if '[' in line and 'x' in line and line.count('i32') > 2:
+                        # 模式1: 数组索引模式 - 有数组类型声明且多个i32索引
+                        # 提取所有i32索引
+                        indices = re.findall(r'i32\s+(-?\d+)', line)
+                        
+                        # 保存类型信息
+                        array_type_match = re.search(r'\[([^\]]+)\]', line)
+                        if array_type_match:
+                            base_type = f"[{array_type_match.group(1)}]"
                         else:
-                            # 简单指针类型
-                            base_type = 'i32'
-                            ptr_type = 'i32*'
+                            base_type = 'array'
                         
                         inst = Instruction(
                             opcode='getelementptr',
                             operands=[base_ptr] + indices,
                             result=result_var,
-                            types=[base_type, ptr_type]
+                            types=[base_type, 'array_index']  # 标记为数组索引模式
                         )
-                        current_block.instructions.append(inst)
-                        continue
+                    else:
+                        # 模式2: 指针偏移模式 - 简单的i32指针加偏移
+                        # 只提取最后一个i32数字作为偏移
+                        offset_match = re.search(r'i32\s+(-?\d+)(?!.*i32)', line)  # 找最后一个i32数字
+                        if offset_match:
+                            offset = offset_match.group(1)
+                        else:
+                            offset = '0'
+                        
+                        inst = Instruction(
+                            opcode='getelementptr',
+                            operands=[base_ptr, offset],
+                            result=result_var,
+                            types=['i32', 'pointer_offset']  # 标记为指针偏移模式
+                        )
+                    
+                    current_block.instructions.append(inst)
+                    continue
                 
                 # 处理ret指令 - 支持变量和立即数返回值
                 if line.startswith('ret'):
@@ -190,14 +210,17 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理alloca指令 (例如: %a = alloca i32)
-                alloca_match = re.match(r'(\%[\w\d]+)\s*=\s*alloca\s+(\w+)', line)
+                # 处理alloca指令 - 修复以支持复杂类型如数组
+                alloca_match = re.match(r'(\%[\w\d]+)\s*=\s*alloca\s+(.+)', line)
                 if alloca_match:
+                    result_var = alloca_match.group(1)
+                    type_str = alloca_match.group(2).strip()
+                    
                     inst = Instruction(
                         opcode='alloca',
                         operands=[],
-                        result=alloca_match.group(1),
-                        types=[alloca_match.group(2)]
+                        result=result_var,
+                        types=[type_str]
                     )
                     current_block.instructions.append(inst)
                     continue

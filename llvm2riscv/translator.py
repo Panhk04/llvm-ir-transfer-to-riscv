@@ -1,5 +1,5 @@
 """
-LLVM IR到RISC-V汇编翻译器主模块
+重构后的LLVM IR到RISC-V汇编翻译器主模块
 """
 
 import re
@@ -55,49 +55,6 @@ class OptimizedLLVMIRTranslator:
             
         return "\n".join(riscv_code)
     
-    def _generate_data_section(self, global_vars):
-        """生成数据段代码"""
-        data_section = [".data"]
-        for var_name, var_type, var_value in global_vars:
-            data_section.append(f".globl {var_name}")
-            data_section.append(f"{var_name}:")
-            if var_type == 'i32':
-                data_section.append(f"    .word {var_value}")
-            elif var_type == 'i64':
-                data_section.append(f"    .dword {var_value}")
-            elif var_type == 'float':
-                data_section.append(f"    .float {var_value}")
-            elif var_type == 'double':
-                data_section.append(f"    .double {var_value}")
-            else:
-                data_section.append(f"    .word {var_value}")  # 默认
-        data_section.append("")  # 添加空行分隔
-        return data_section
-    
-    def _extract_global_variables(self, ir_code):
-        """从LLVM IR代码中提取全局变量声明"""
-        global_vars = []
-        lines = ir_code.strip().split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            # 匹配全局变量声明: @g_b = dso_local global i32 3
-            global_match = re.match(r'@(\w+)\s*=\s*(?:dso_local\s+)?global\s+(\w+)\s+(.+)', line)
-            if global_match:
-                var_name = global_match.group(1)
-                var_type = global_match.group(2)
-                var_value = global_match.group(3)
-                global_vars.append((var_name, var_type, var_value))
-        
-        return global_vars
-    
-    def _build_label_map(self, functions):
-        """构建基本块标签映射"""
-        self.label_map = {}
-        for func in functions:
-            for block in func.blocks:
-                self.label_map[block.name] = f".{func.name}_{block.name[1:]}"
-    
     def _translate_function(self, function):
         """翻译单个函数"""
         riscv_code = []
@@ -109,23 +66,32 @@ class OptimizedLLVMIRTranslator:
         # 预处理所有alloca指令以建立stack_frame映射
         self._preprocess_alloca_instructions(function)
         
-        # 计算所需的栈空间
-        stack_size = self.allocator.get_stack_size()
-        # 为数组和局部变量预留足够空间，确保至少128字节的栈空间
-        min_stack_size = 128
-        if stack_size < min_stack_size:
-            stack_size = min_stack_size
+        # 计算所需的栈空间，加上额外的临时变量空间
+        base_stack_size = self.allocator.get_stack_size()
+        # 为临时变量和溢出寄存器预留更多空间
+        temp_space = max(200, len(function.blocks[0].instructions) * 8)  # 每条指令预留8字节
+        total_stack_size = base_stack_size + temp_space
+        
+        # 确保栈对齐 (16字节对齐)，并预留函数调用空间
+        aligned_size = (total_stack_size + 32 + 15) // 16 * 16  # 额外32字节用于ra/fp保存
+        
+        # 设置instruction_translator的栈大小
+        self.instruction_translator.set_stack_size(aligned_size)
         
         # 函数序言 - 设置栈帧
-        if stack_size > 0:
-            # 确保栈对齐 (16字节对齐)
-            aligned_size = (stack_size + 15) // 16 * 16
-            riscv_code.append("    # Function prologue")
-            riscv_code.append(f"    addi sp, sp, -{aligned_size}")
-            # 保存返回地址和帧指针
-            riscv_code.append(f"    sw ra, {aligned_size-4}(sp)")
-            riscv_code.append(f"    sw s0, {aligned_size-8}(sp)")
-            riscv_code.append(f"    addi s0, sp, {aligned_size}")
+        riscv_code.append("    # Function prologue")
+        riscv_code.append(f"    addi sp, sp, -{aligned_size}")
+        # 保存返回地址和帧指针到栈的最高地址
+        riscv_code.append(f"    sw ra, {aligned_size-4}(sp)")
+        riscv_code.append(f"    sw s0, {aligned_size-8}(sp)")
+        riscv_code.append(f"    addi s0, sp, {aligned_size}")
+        
+        # 更新分配器的栈空间信息，避免冲突
+        self.allocator.reserved_stack_top = aligned_size - 16  # 为ra/s0保留的空间
+        
+        # 添加零初始化代码（如果有未初始化的数组）
+        zero_init_code = self._generate_array_zero_initialization()
+        riscv_code.extend(zero_init_code)
         
         # 翻译每个基本块
         for block in function.blocks:
@@ -142,27 +108,30 @@ class OptimizedLLVMIRTranslator:
                 riscv_inst = self.instruction_translator.translate_instruction(inst)
                 riscv_code.extend(riscv_inst)
         
-        # 如果没有返回指令，添加默认返回
-        if not any(inst.opcode == 'ret' for block in function.blocks for inst in block.instructions):
+        # 检查是否已经有返回指令，避免重复添加
+        has_ret_instruction = any(inst.opcode == 'ret' for block in function.blocks for inst in block.instructions)
+        
+        if not has_ret_instruction:
+            # 如果没有返回指令，添加默认返回
             riscv_code.append("    # Default return")
             riscv_code.append("    li a0, 0")
-        
-        # 函数尾声
-        if stack_size > 0:
-            aligned_size = (stack_size + 15) // 16 * 16
             riscv_code.append("    # Function epilogue")
             riscv_code.append(f"    lw ra, {aligned_size-4}(sp)")
             riscv_code.append(f"    lw s0, {aligned_size-8}(sp)")
             riscv_code.append(f"    addi sp, sp, {aligned_size}")
+            riscv_code.append("    ret")
         
-        riscv_code.append("    ret")
+        # 注意：如果有ret指令，函数尾声已经在instruction_translator中处理
+        
         riscv_code.append("")  # 添加空行分隔函数
         return riscv_code
     
     def _preprocess_alloca_instructions(self, function):
         """预处理所有alloca指令，建立stack_frame映射"""
+        alloca_vars = []
+        
         for block in function.blocks:
-            for inst in block.instructions:
+            for i, inst in enumerate(block.instructions):
                 if inst.opcode == 'alloca':
                     result_reg = inst.result
                     type_str = inst.types[0]
@@ -180,6 +149,80 @@ class OptimizedLLVMIRTranslator:
                     
                     # 直接将栈偏移记录到stack_frame中
                     self.allocator.stack_frame[result_reg] = stack_offset
+                    
+                    # 记录alloca变量，用于后续检查是否需要零初始化
+                    alloca_vars.append((result_reg, size, stack_offset))
+        
+        # 检查哪些alloca变量没有被显式初始化，需要零初始化
+        self._check_and_init_uninitialized_arrays(function, alloca_vars)
+    
+    def _check_and_init_uninitialized_arrays(self, function, alloca_vars):
+        """检查并初始化未初始化的数组"""
+        # 先收集所有有初始化的变量
+        initialized_vars = set()
+        
+        for block in function.blocks:
+            for inst in block.instructions:
+                if inst.opcode == 'getelementptr':
+                    base_ptr = inst.operands[0]
+                    gep_result = inst.result
+                    
+                    # 检查这个getelementptr的结果是否被store指令使用
+                    for block2 in function.blocks:
+                        for inst2 in block2.instructions:
+                            if inst2.opcode == 'store' and len(inst2.operands) > 1 and inst2.operands[1] == gep_result:
+                                initialized_vars.add(base_ptr)
+                                break
+        
+        # 找出未初始化的数组变量
+        self.uninitialized_arrays = []
+        for var_name, size, stack_offset in alloca_vars:
+            # 如果变量不在初始化列表中，说明需要零初始化
+            if var_name not in initialized_vars:
+                self.uninitialized_arrays.append((var_name, size, stack_offset))
+                print(f"DEBUG: Found uninitialized array: {var_name}, size: {size}, offset: {stack_offset}")
+            else:
+                print(f"DEBUG: Array {var_name} has initialization")
+    
+    def _generate_array_zero_initialization(self):
+        """生成未初始化数组的零初始化代码"""
+        riscv_code = []
+        
+        if hasattr(self, 'uninitialized_arrays'):
+            for var_name, size, stack_offset in self.uninitialized_arrays:
+                riscv_code.append(f"    # Zero-initialize uninitialized array {var_name} ({size} bytes)")
+                
+                # 直接初始化数组（简化版本）
+                for offset in range(0, size, 4):
+                    riscv_code.append(f"    sw zero, {stack_offset - offset}(sp)")
+        
+        return riscv_code
+    
+    def _generate_data_section(self, global_vars):
+        """生成数据段"""
+        data_section = [".data"]
+        for var_name, var_type, var_value in global_vars:
+            data_section.append(f".globl {var_name}")
+            data_section.append(f"{var_name}:")
+            if var_type == 'i32':
+                data_section.append(f"    .word {var_value}")
+            elif var_type == 'i64':
+                data_section.append(f"    .dword {var_value}")
+            elif var_type == 'float':
+                data_section.append(f"    .float {var_value}")
+            elif var_type == 'double':
+                data_section.append(f"    .double {var_value}")
+            else:
+                data_section.append(f"    .word {var_value}")  # 默认
+        data_section.append("")  # 添加空行分隔
+        return data_section
+    
+    def _build_label_map(self, functions):
+        """构建基本块标签映射"""
+        self.label_map = {}
+        for func in functions:
+            for block in func.blocks:
+                self.label_map[block.name] = f".{func.name}_{block.name[1:]}"
     
     def _extract_global_variables(self, ir_code):
         """从LLVM IR代码中提取全局变量声明"""
@@ -197,139 +240,3 @@ class OptimizedLLVMIRTranslator:
                 global_vars.append((var_name, var_type, var_value))
         
         return global_vars
-
-    def _get_temp_register(self):
-        """获取一个临时寄存器"""
-        # 改进的临时寄存器分配，避免重复使用
-        temp_candidates = ['s0', 's1', 's2', 't6']
-        for reg in temp_candidates:
-            if not self.allocator.reg_in_use.get(reg, False):
-                # 临时标记为使用中，避免重复分配
-                self.allocator.reg_in_use[reg] = True
-                return reg
-        return 's0'  # 如果都被使用，使用s0作为备用
-    
-    def _get_unique_temp_registers(self, count):
-        """获取多个不同的临时寄存器"""
-        temp_candidates = ['s0', 's1', 's2', 's3', 't6']
-        allocated_regs = []
-        
-        for i in range(min(count, len(temp_candidates))):
-            reg = temp_candidates[i]
-            if not self.allocator.reg_in_use.get(reg, False):
-                self.allocator.reg_in_use[reg] = True
-                allocated_regs.append(reg)
-            else:
-                # 如果寄存器被占用，使用备用方案
-                allocated_regs.append(f's{i}')
-        
-        # 如果需要的寄存器数量超过可用数量，重复使用
-        while len(allocated_regs) < count:
-            allocated_regs.append(allocated_regs[len(allocated_regs) % len(temp_candidates)])
-        
-        return allocated_regs
-    
-    def _store_to_stack_if_needed(self, result_reg, stack_location, data_type, riscv_instructions):
-        """如果目标是栈位置，将寄存器值存储到栈上"""
-        if '(sp)' in stack_location:
-            if data_type in [DataType.F32, DataType.F64]:
-                store_instr = "fsw" if data_type == DataType.F32 else "fsd"
-            else:
-                store_instr = "sw"
-            riscv_instructions.append(f"    {store_instr} {result_reg}, {stack_location}")
-            return True
-        return False
-
-    def _translate_getelementptr(self, instruction):
-        """翻译getelementptr指令 - 计算数组元素地址"""
-        riscv_instructions = []
-        result = instruction.result
-        base_ptr = instruction.operands[0]  # 基础指针
-        indices = instruction.operands[1:]  # 索引列表
-        
-        # 获取目标寄存器
-        dest_reg_or_stack = self.allocator.allocate_register(result, DataType.I32, False)
-        
-        # 获取基础指针 - 关键修复：正确处理alloca分配的指针
-        base_reg = None
-        if base_ptr.startswith('%'):
-            # 首先检查是否在stack_frame中（alloca分配的变量）
-            if base_ptr in self.allocator.stack_frame:
-                # 直接获取栈偏移并计算地址
-                stack_offset = self.allocator.stack_frame[base_ptr]
-                temp_reg = self._get_temp_register()
-                riscv_instructions.append(f"    # Calculate address for {base_ptr} at stack offset {stack_offset}")
-                riscv_instructions.append(f"    addi {temp_reg}, sp, {stack_offset}")
-                base_reg = temp_reg
-            else:
-                # 尝试从寄存器映射获取
-                base_reg_or_stack = self.allocator.get_physical_reg(base_ptr)
-                if base_reg_or_stack:
-                    if '(sp)' in base_reg_or_stack:
-                        # 基础指针在栈上，先加载到临时寄存器
-                        temp_reg = self._get_temp_register()
-                        riscv_instructions.append(f"    lw {temp_reg}, {base_reg_or_stack}")
-                        base_reg = temp_reg
-                    else:
-                        base_reg = base_reg_or_stack
-                else:
-                    # 如果既不在stack_frame中也不在reg_map中，这可能是一个错误
-                    # 但我们可以尝试强制为它分配一个栈位置
-                    riscv_instructions.append(f"    # WARNING: Base pointer {base_ptr} not found, creating default mapping")
-                    # 为这个指针创建一个栈位置
-                    if base_ptr not in self.allocator.stack_frame:
-                        self.allocator.stack_offset += 32  # 默认为数组分配32字节
-                        self.allocator.stack_frame[base_ptr] = self.allocator.stack_offset
-                    
-                    stack_offset = self.allocator.stack_frame[base_ptr]
-                    temp_reg = self._get_temp_register()
-                    riscv_instructions.append(f"    addi {temp_reg}, sp, {stack_offset}")
-                    base_reg = temp_reg
-        else:
-            base_reg = base_ptr
-        
-        # 确保base_reg不为空
-        if not base_reg:
-            riscv_instructions.append(f"    # ERROR: Failed to resolve base pointer {base_ptr}")
-            return riscv_instructions
-        
-        # 计算地址偏移
-        total_offset = 0
-        element_size = 4  # i32 = 4字节
-        
-        if len(indices) > 0:
-            # 跳过第一个索引（通常是0，表示指向数组开始）
-            start_idx = 1 if len(indices) > 1 and indices[0] == '0' else 0
-            
-            # 处理剩余的索引
-            for i in range(start_idx, len(indices)):
-                idx = indices[i]
-                if idx.isdigit():
-                    # 对于多维数组 [4 x [2 x i32]]，每个内层数组有2个元素
-                    if i == start_idx:
-                        # 第一维索引，每个元素是一个[2 x i32]数组
-                        inner_array_size = 2 * element_size  # 2个i32元素
-                        total_offset += int(idx) * inner_array_size
-                    else:
-                        # 第二维索引，直接是元素偏移
-                        total_offset += int(idx) * element_size
-        
-        # 生成最终地址计算指令
-        if total_offset == 0:
-            # 偏移为0，直接复制基址
-            if '(sp)' in dest_reg_or_stack:
-                temp_reg = self._get_temp_register()
-                riscv_instructions.append(f"    mv {temp_reg}, {base_reg}")
-                self._store_to_stack_if_needed(temp_reg, dest_reg_or_stack, DataType.I32, riscv_instructions)
-            else:
-                riscv_instructions.append(f"    mv {dest_reg_or_stack}, {base_reg}")
-        else:
-            # 添加偏移
-            if '(sp)' in dest_reg_or_stack:
-                temp_reg = self._get_temp_register()
-                riscv_instructions.append(f"    addi {temp_reg}, {base_reg}, {total_offset}")
-                self._store_to_stack_if_needed(temp_reg, dest_reg_or_stack, DataType.I32, riscv_instructions)
-            else:
-                riscv_instructions.append(f"    addi {dest_reg_or_stack}, {base_reg}, {total_offset}")
-        
-        return riscv_instructions

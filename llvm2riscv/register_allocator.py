@@ -24,6 +24,7 @@ class RegisterAllocator:
         self.stack_frame = {}
         self.param_offset = 0
         self.saved_regs_offset = {}
+        self.temp_stack_offset = 0  # 临时栈偏移
     
     def reset(self):
         """重置寄存器分配器状态"""
@@ -35,6 +36,7 @@ class RegisterAllocator:
         self.stack_frame = {}
         self.param_offset = 0
         self.saved_regs_offset = {}
+        self.temp_stack_offset = 0
     
     def analyze_liveness(self, function):
         """分析虚拟寄存器的活跃范围"""
@@ -66,8 +68,15 @@ class RegisterAllocator:
         elif data_type in [DataType.F32, DataType.F64]:
             is_float = True
         
-        # 优先尝试分配空闲寄存器
-        reg_pool = self.float_regs if is_float else self.temp_regs + self.saved_regs
+        # 优先尝试分配空闲寄存器，但排除s0（帧指针）
+        if is_float:
+            reg_pool = self.float_regs
+        else:
+            # 从temp_regs和saved_regs中排除s0
+            available_temp_regs = [reg for reg in self.temp_regs if reg != 's0']
+            available_saved_regs = [reg for reg in self.saved_regs if reg != 's0']
+            reg_pool = available_temp_regs + available_saved_regs
+        
         for reg in reg_pool:
             if not self.reg_in_use[reg]:
                 self.reg_map[virtual_reg] = reg
@@ -81,11 +90,18 @@ class RegisterAllocator:
             size = 4  # 默认4字节
         
         if virtual_reg not in self.stack_frame:
-            self.stack_offset += size
+            # 为临时变量分配栈空间时，要避免与保留区域冲突
+            self.temp_stack_offset += size
             # 确保栈对齐（4字节对齐）
-            if self.stack_offset % 4 != 0:
-                self.stack_offset = (self.stack_offset + 3) // 4 * 4
-            self.stack_frame[virtual_reg] = self.stack_offset
+            if self.temp_stack_offset % 4 != 0:
+                self.temp_stack_offset = (self.temp_stack_offset + 3) // 4 * 4
+            
+            # 检查是否会与保留区域冲突
+            if hasattr(self, 'reserved_stack_top') and self.temp_stack_offset > self.reserved_stack_top - 32:
+                # 如果接近保留区域，调整偏移
+                self.temp_stack_offset = max(self.stack_offset + 100, self.temp_stack_offset)
+            
+            self.stack_frame[virtual_reg] = self.temp_stack_offset
         
         return f"{self.stack_frame[virtual_reg]}(sp)"
     
@@ -115,18 +131,32 @@ class RegisterAllocator:
     
     def get_temp_register(self):
         """获取一个临时寄存器"""
-        # 改进的临时寄存器分配，避免重复使用
-        temp_candidates = ['s0', 's1', 's2', 't6']
-        for reg in temp_candidates:
+        # 改进的临时寄存器分配，确保不使用s0（帧指针）
+        temp_candidates = ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 's1', 's2', 's3', 's4', 's5', 's6', 's7']
+        
+        # 使用轮转分配策略
+        if not hasattr(self, 'temp_register_counter'):
+            self.temp_register_counter = 0
+        
+        # 尝试找到一个未被使用的寄存器
+        for i in range(len(temp_candidates)):
+            candidate_idx = (self.temp_register_counter + i) % len(temp_candidates)
+            reg = temp_candidates[candidate_idx]
+            
             if not self.reg_in_use.get(reg, False):
-                # 临时标记为使用中，避免重复分配
-                self.reg_in_use[reg] = True
+                self.temp_register_counter = (candidate_idx + 1) % len(temp_candidates)
+                # 不要标记为永久使用，这样可以被重复使用
                 return reg
-        return 's0'  # 如果都被使用，使用s0作为备用
+        
+        # 如果所有寄存器都被使用，使用轮转策略强制分配（但永远不使用s0）
+        reg = temp_candidates[self.temp_register_counter % len(temp_candidates)]
+        self.temp_register_counter = (self.temp_register_counter + 1) % len(temp_candidates)
+        return reg
     
     def get_unique_temp_registers(self, count):
         """获取多个不同的临时寄存器"""
-        temp_candidates = ['s0', 's1', 's2', 's3', 't6']
+        # 排除s0（帧指针），使用其他临时寄存器
+        temp_candidates = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 't6']
         allocated_regs = []
         
         for i in range(min(count, len(temp_candidates))):
@@ -135,12 +165,13 @@ class RegisterAllocator:
                 self.reg_in_use[reg] = True
                 allocated_regs.append(reg)
             else:
-                # 如果寄存器被占用，使用备用方案
-                allocated_regs.append(f's{i}')
+                # 如果寄存器被占用，使用备用方案（但永远不使用s0）
+                backup_reg = temp_candidates[(i + 1) % len(temp_candidates)]
+                allocated_regs.append(backup_reg)
         
         # 如果需要的寄存器数量超过可用数量，重复使用
         while len(allocated_regs) < count:
-            allocated_regs.append(allocated_regs[len(allocated_regs) % len(temp_candidates)])
+            allocated_regs.append(temp_candidates[len(allocated_regs) % len(temp_candidates)])
         
         return allocated_regs
     
