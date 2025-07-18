@@ -318,7 +318,7 @@ class InstructionTranslator:
         return riscv_instructions
     
     def _translate_getelementptr(self, instruction):
-        """翻译getelementptr指令 - 根据IR解析器的类型标记正确处理两种模式"""
+        """翻译getelementptr指令 - 修复数组维度解析和步长计算"""
         riscv_instructions = []
         result = instruction.result
         base_ptr = instruction.operands[0]
@@ -347,33 +347,60 @@ class InstructionTranslator:
             riscv_instructions.append(f"    # ERROR: Failed to resolve base pointer {base_ptr}")
             return riscv_instructions
 
-        # 2. 解析数组类型和维度
+        # 2. 解析数组类型和维度 - 修复递归解析
         array_type_str = instruction.types[0]
-        dims_match = re.findall(r'\[(\d+)\s*x', array_type_str)
-        dims = [int(d) for d in dims_match]
+        dims = []
+        current_str = array_type_str
         
-        element_type_str = array_type_str.split('x')[-1].strip()
-        element_type_str = element_type_str.replace(']', '').replace('*', '').strip()
+        # 递归提取所有维度
+        while '[' in current_str and 'x' in current_str:
+            start_idx = current_str.find('[')
+            end_idx = current_str.find(']', start_idx)
+            if end_idx == -1:
+                break
+                
+            dim_part = current_str[start_idx+1:end_idx]
+            parts = dim_part.split('x', 1)
+            
+            if not parts:
+                break
+                
+            try:
+                dim_size = int(parts[0].strip())
+                dims.append(dim_size)
+            except ValueError:
+                break
+                
+            if len(parts) > 1:
+                current_str = parts[1].strip()
+            else:
+                break
+        
+        # 获取最终元素类型
+        element_type_str = current_str.replace(']', '').replace('*', '').strip()
         element_size = calculate_type_size(get_data_type(element_type_str))
 
-        # 3. 计算偏移量
-        offset_reg = self.allocator.get_temp_register()
-        riscv_instructions.append(f"    li {offset_reg}, 0")
+        # 3. 计算步长 - 修复步长计算逻辑
+        strides = []
+        current_stride = element_size
+        # 从最内层到最外层计算步长
+        for dim in reversed(dims):
+            strides.insert(0, current_stride)
+            current_stride *= dim
 
         # 跳过第一个索引（通常是0，指向数组本身）
         indices_to_process = indices[1:]
         
-        # 计算每个维度的步长
-        strides = []
-        current_stride = element_size
-        for dim in reversed(dims):
-            strides.insert(0, current_stride)
-            current_stride *= dim
+        # 4. 计算偏移量
+        offset_reg = self.allocator.get_temp_register()
+        riscv_instructions.append(f"    li {offset_reg}, 0")
         
-        # 确保strides和indices_to_process长度匹配
-        if len(strides) > len(dims):
-             strides = strides[len(strides) - len(dims):]
-
+        # 防止索引数量超过维度数量
+        if len(indices_to_process) > len(strides):
+            riscv_instructions.append("    # WARNING: More indices than dimensions")
+            # 只处理有效维度
+            indices_to_process = indices_to_process[:len(strides)]
+        
         for i, index_val in enumerate(indices_to_process):
             stride = strides[i]
             
@@ -386,11 +413,11 @@ class InstructionTranslator:
             riscv_instructions.append(f"    mul {temp_mul_reg}, {index_reg}, {stride_reg}")
             riscv_instructions.append(f"    add {offset_reg}, {offset_reg}, {temp_mul_reg}")
 
-        # 4. 计算最终地址
+        # 5. 计算最终地址
         final_addr_reg = self.allocator.get_temp_register()
         riscv_instructions.append(f"    add {final_addr_reg}, {base_reg}, {offset_reg}")
 
-        # 5. 存储最终地址
+        # 6. 存储最终地址
         if '(sp)' in dest_reg_or_stack:
             riscv_instructions.append(f"    sw {final_addr_reg}, {dest_reg_or_stack}")
         else:

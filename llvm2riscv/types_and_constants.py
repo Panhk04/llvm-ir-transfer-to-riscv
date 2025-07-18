@@ -4,6 +4,7 @@
 
 from collections import namedtuple
 from enum import Enum
+import re
 
 # 定义数据结构
 Function = namedtuple('Function', ['name', 'return_type', 'params', 'blocks'])
@@ -98,48 +99,51 @@ def get_data_type(type_str):
     return DataType.I32  # 默认
 
 def calculate_type_size(type_str):
-    """计算LLVM类型的字节大小"""
-    # 处理数组类型 [4 x [2 x i32]]
-    if type_str.startswith('[') and 'x' in type_str:
-        # 解析多维数组
-        import re
-        
-        # 提取所有数字
-        numbers = re.findall(r'\[(\d+)\s+x', type_str)
-        total_elements = 1
-        for num in numbers:
-            total_elements *= int(num)
-        
-        # 确定基础类型大小
-        if 'i32' in type_str:
-            element_size = 4
-        elif 'i64' in type_str:
-            element_size = 8
-        elif 'i16' in type_str:
-            element_size = 2
-        elif 'i8' in type_str:
-            element_size = 1
-        elif 'float' in type_str:
-            element_size = 4
-        elif 'double' in type_str:
-            element_size = 8
-        else:
-            element_size = 4  # 默认
-        
-        return total_elements * element_size
+    """计算LLVM类型的字节大小 - 修复递归计算嵌套数组大小"""
+    # 递归计算数组维度的总元素数
+    total_elements = 1
+    current_type = type_str
+    dims = []
     
-    # 处理基础类型
-    elif type_str == 'i32':
-        return 4
-    elif type_str == 'i64':
-        return 8
-    elif type_str == 'i16':
-        return 2
-    elif type_str == 'i8':
-        return 1
-    elif type_str == 'float':
-        return 4
-    elif type_str == 'double':
-        return 8
+    # 递归提取所有维度
+    while '[' in current_type and 'x' in current_type:
+        start_idx = current_type.find('[')
+        end_idx = current_type.find(']', start_idx)
+        if end_idx == -1:
+            break
+            
+        dim_part = current_type[start_idx+1:end_idx]
+        parts = dim_part.split('x', 1)
+        
+        if not parts:
+            break
+            
+        try:
+            dim_size = int(parts[0].strip())
+            dims.append(dim_size)
+            total_elements *= dim_size
+        except ValueError:
+            break
+            
+        if len(parts) > 1:
+            current_type = parts[1].strip()
+        else:
+            break
+    
+    # 确定基础类型大小
+    if 'i32' in current_type:
+        element_size = 4
+    elif 'i64' in current_type:
+        element_size = 8
+    elif 'i16' in current_type:
+        element_size = 2
+    elif 'i8' in current_type:
+        element_size = 1
+    elif 'float' in current_type:
+        element_size = 4
+    elif 'double' in current_type:
+        element_size = 8
     else:
-        return 4  # 默认
+        element_size = 4  # 默认
+    
+    return total_elements * element_size
