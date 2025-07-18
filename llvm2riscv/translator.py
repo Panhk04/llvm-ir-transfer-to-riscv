@@ -156,9 +156,136 @@ class OptimizedLLVMIRTranslator:
             self.current_function = func
             self.allocator.reset()
             self.allocator.analyze_liveness(func)
+            
+            # 应用优化
+            self._optimize_function(func)
+            
             riscv_code.extend(self._translate_function(func))
             
         return "\n".join(riscv_code)
+    
+    def _optimize_function(self, function):
+        """应用所有优化到函数"""
+        self._dead_code_elimination(function)
+        self._constant_folding(function)
+        self._optimize_blocks(function)
+    
+    def _dead_code_elimination(self, function):
+        """死代码删除优化"""
+        # 收集活跃变量（被使用的变量）
+        used_vars = set()
+        for block in function.blocks:
+            for inst in block.instructions:
+                # 收集所有被使用的操作数
+                for op in inst.operands:
+                    if op and op.startswith('%'):
+                        used_vars.add(op)
+        
+        # 标记活跃指令
+        for block in function.blocks:
+            new_insts = []
+            for inst in block.instructions:
+                # 保留有副作用的指令（存储、返回、调用、分支等）
+                if inst.opcode in ['store', 'call', 'ret', 'br', 'jmp']:
+                    new_insts.append(inst)
+                # 保留结果被使用的指令
+                elif inst.result and inst.result in used_vars:
+                    new_insts.append(inst)
+                # 其他情况视为死代码，不保留
+                else:
+                    # 如果指令有副作用但不在列表中，保留它（安全做法）
+                    if inst.opcode in ['load', 'alloca']:
+                        new_insts.append(inst)
+            block.instructions = new_insts
+    
+    def _constant_folding(self, function):
+        """常量折叠优化"""
+        for block in function.blocks:
+            new_insts = []
+            for inst in block.instructions:
+                # 尝试折叠常量表达式
+                folded = self._fold_constants(inst)
+                if folded:
+                    new_insts.append(folded)
+                else:
+                    new_insts.append(inst)
+            block.instructions = new_insts
+    
+    def _fold_constants(self, inst):
+        """折叠常量表达式"""
+        # 整数算术运算
+        if inst.opcode in ['add', 'sub', 'mul', 'sdiv']:
+            # 检查是否两个操作数都是常量
+            if all(op.isdigit() or (op.startswith('-') and op[1:].isdigit()) for op in inst.operands):
+                op1 = int(inst.operands[0])
+                op2 = int(inst.operands[1])
+                
+                # 执行计算
+                if inst.opcode == 'add':
+                    result = op1 + op2
+                elif inst.opcode == 'sub':
+                    result = op1 - op2
+                elif inst.opcode == 'mul':
+                    result = op1 * op2
+                elif inst.opcode == 'sdiv' and op2 != 0:  # 避免除以零
+                    result = op1 // op2
+                else:
+                    return None  # 无法折叠
+                
+                # 创建新的常量指令（伪指令，实际会被替换为常量）
+                return Instruction(
+                    opcode='const',
+                    operands=[str(result)],
+                    result=inst.result,
+                    types=inst.types
+                )
+        
+        # 浮点算术运算
+        elif inst.opcode in ['fadd', 'fsub', 'fmul', 'fdiv']:
+            # 检查是否两个操作数都是浮点常量
+            try:
+                op1 = float(inst.operands[0])
+                op2 = float(inst.operands[1])
+                
+                # 执行计算
+                if inst.opcode == 'fadd':
+                    result = op1 + op2
+                elif inst.opcode == 'fsub':
+                    result = op1 - op2
+                elif inst.opcode == 'fmul':
+                    result = op1 * op2
+                elif inst.opcode == 'fdiv' and op2 != 0.0:  # 避免除以零
+                    result = op1 / op2
+                else:
+                    return None  # 无法折叠
+                
+                # 创建新的浮点常量指令
+                return Instruction(
+                    opcode='fconst',
+                    operands=[str(result)],
+                    result=inst.result,
+                    types=inst.types
+                )
+            except (ValueError, TypeError):
+                pass
+        
+        return None  # 无法折叠
+    
+    def _optimize_blocks(self, function):
+        """基本块优化"""
+        # 1. 删除空基本块（除了入口块）
+        function.blocks = [b for b in function.blocks 
+                          if b.instructions or b.name == function.blocks[0].name]
+        
+        # 2. 合并冗余跳转
+        for i, block in enumerate(function.blocks):
+            if block.instructions and block.instructions[-1].opcode == 'jmp':
+                target = block.instructions[-1].operands[0]
+                next_block = function.blocks[i+1] if i+1 < len(function.blocks) else None
+                
+                # 如果是跳转到下一个块，删除跳转
+                if next_block and next_block.name == target:
+                    block.instructions = block.instructions[:-1]
     
     def _build_label_map(self, functions):
         """构建基本块标签映射"""
@@ -191,7 +318,16 @@ class OptimizedLLVMIRTranslator:
                 
             # 翻译指令
             for inst in block.instructions:
-                riscv_code.extend(self._translate_instruction(inst))
+                # 处理常量折叠后的伪指令
+                if inst.opcode == 'const':
+                    riscv_inst = self._translate_constant(inst)
+                    riscv_code.extend(riscv_inst)
+                elif inst.opcode == 'fconst':
+                    riscv_inst = self._translate_fconstant(inst)
+                    riscv_code.extend(riscv_inst)
+                else:
+                    riscv_inst = self._translate_instruction(inst)
+                    riscv_code.extend(riscv_inst)
         
         # 如果没有返回指令，添加默认返回
         if not any(inst.opcode == 'ret' for block in function.blocks for inst in block.instructions):
@@ -207,6 +343,40 @@ class OptimizedLLVMIRTranslator:
         
         riscv_code.append("")  # 添加空行分隔函数
         return riscv_code
+    
+    def _translate_constant(self, instruction):
+        """翻译常量指令（由常量折叠产生）"""
+        riscv_instructions = []
+        result = instruction.result
+        value = instruction.operands[0]
+        data_type = self._get_data_type(instruction.types[0])
+        
+        # 获取目标寄存器
+        is_float = data_type in [DataType.F32, DataType.F64]
+        dest_reg = self.allocator.allocate_register(result, data_type, is_float)
+        
+        # 加载常量值
+        riscv_instructions.append(f"    li {dest_reg}, {value}")
+        
+        return riscv_instructions
+    
+    def _translate_fconstant(self, instruction):
+        """翻译浮点常量指令（由常量折叠产生）"""
+        riscv_instructions = []
+        result = instruction.result
+        value = float(instruction.operands[0])
+        data_type = self._get_data_type(instruction.types[0])
+        
+        # 获取目标寄存器
+        dest_reg = self.allocator.allocate_register(result, data_type, True)
+        
+        # 加载浮点常量（简化实现）
+        # 实际实现可能需要使用内存加载
+        riscv_instructions.append(f"    # Load float constant {value}")
+        riscv_instructions.append(f"    lui a0, {value.hex()}")
+        riscv_instructions.append(f"    fmv.w.x {dest_reg}, a0")
+        
+        return riscv_instructions
     
     def _get_data_type(self, type_str):
         """将LLVM类型字符串转换为DataType枚举"""

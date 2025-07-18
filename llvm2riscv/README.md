@@ -1,6 +1,6 @@
 # llvm转化为riscv工程结构
 
-## 文件结构如下
+## 1.1 文件结构如下
 
 llvm2riscv/
 ├── translator.py            # 主转换逻辑
@@ -9,14 +9,16 @@ llvm2riscv/
 ├── riscv_emitter.py         # RISC-V 代码生成
 └── testcase/                   # 测试用例
 
-### translator.py
+## 1.2 translator.py
+
+### 1.2.1 功能描述
 
 实现了LLVM IR到RISC-V的完整转换逻辑
    - 调用ir_parser.py解析LLVM IR
    - 调用register_allocator.py进行寄存器分配
    - 调用riscv_emitter.py生成RISC-V代码
 
-现在支持的RISC-V指令：
+### 1.2.2 支持的RISC-V指令：
 
 内存管理类：
 
@@ -38,8 +40,35 @@ llvm2riscv/
 
 >JAL JALR BEQ BNE BLT BGE BLTU BGEU
 
+### 1.2.3 优化技术
 
-### ir_parser.py
+translator文件中实现了死代码删除、常量折叠等基本优化技术，以减少生成的RISC-V代码量并提高执行效率。
+
+#### 1.2.3.1 死代码删除(Dead Code Elimination)
+
+实现位置：_dead_code_elimination 方法
+
+优化逻辑：
+
+收集所有被使用的变量（活跃变量）
+
+遍历所有指令，保留以下指令：
+  - 有副作用的指令（存储、调用、返回、分支）
+  - 结果被使用的指令
+  - 加载和内存分配指令（安全保留）
+  - 删除未被使用的计算结果
+
+#### 1.2.3.2 常量折叠 (Constant Folding)
+
+实现位置：_constant_folding 和 _fold_constants 方法
+
+优化逻辑：
+  - 识别可折叠的常量表达式（包括整数和浮点运算）：
+  - 在编译时计算结果
+  - 用常量指令替换原指令
+  - 添加特殊处理来处理常量指令（_translate_constant 和 _translate_fconstant）
+
+### 1.3 ir_parser.py
 
 实现了完整的LLVM IR解析器
    - 使用正则表达式解析各种指令类型
