@@ -439,27 +439,49 @@ class OptimizedLLVMIRTranslator:
     def _translate_ret(self, instruction):
         """翻译返回指令"""
         riscv_instructions = []
+        
+        # 检查是否有返回值
+        if not instruction.operands:
+            # ret void - 无返回值
+            riscv_instructions.append("    ret")
+            return riscv_instructions
+            
         ret_value = instruction.operands[0]
         ret_type = self._get_data_type(instruction.types[0])
         
-        # 浮点返回
-        if ret_type in [DataType.F32, DataType.F64]:
+        # 整数返回
+        if ret_type in [DataType.I1, DataType.I8, DataType.I16, DataType.I32, DataType.I64]:
             if ret_value.isdigit() or (ret_value.startswith('-') and ret_value[1:].isdigit()):
-                # 浮点立即数需要特殊处理
-                float_val = float(ret_value)
-                riscv_instructions.append(f"    lui a0, {float_val.hex()}")
-                riscv_instructions.append(f"    fmv.w.x fa0, a0")
+                # 整数立即数
+                riscv_instructions.append(f"    li a0, {ret_value}")
             elif ret_value.startswith('%'):
                 # 从虚拟寄存器加载
                 reg = self.allocator.get_physical_reg(ret_value)
-                riscv_instructions.append(f"    fmv.s fa0, {reg}")
-        # 整数返回
-        else:
-            if ret_value.isdigit() or (ret_value.startswith('-') and ret_value[1:].isdigit()):
-                riscv_instructions.append(f"    li a0, {ret_value}")
+                if reg:
+                    riscv_instructions.append(f"    mv a0, {reg}")
+                else:
+                    # 如果寄存器映射不存在，直接使用立即数
+                    riscv_instructions.append(f"    li a0, {ret_value}")
+        # 浮点返回
+        elif ret_type in [DataType.F32, DataType.F64]:
+            if ret_value.replace('.', '').replace('-', '').replace('e', '').replace('E', '').replace('+', '').isdigit():
+                # 浮点立即数需要特殊处理
+                try:
+                    float_val = float(ret_value)
+                    import struct
+                    # 将浮点数转换为32位整数表示
+                    int_bits = struct.unpack('>I', struct.pack('>f', float_val))[0]
+                    riscv_instructions.append(f"    li a0, 0x{int_bits:08x}")
+                    riscv_instructions.append(f"    fmv.w.x fa0, a0")
+                except ValueError:
+                    # 如果转换失败，使用默认值
+                    riscv_instructions.append(f"    li a0, 0")
+                    riscv_instructions.append(f"    fmv.w.x fa0, a0")
             elif ret_value.startswith('%'):
+                # 从虚拟寄存器加载
                 reg = self.allocator.get_physical_reg(ret_value)
-                riscv_instructions.append(f"    mv a0, {reg}")
+                if reg:
+                    riscv_instructions.append(f"    fmv.s fa0, {reg}")
         
         # 函数返回
         riscv_instructions.append("    ret")

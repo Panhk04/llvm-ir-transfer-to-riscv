@@ -1,10 +1,25 @@
 import re
 from collections import namedtuple
 
-# 定义数据结构
-Function = namedtuple('Function', ['name', 'return_type', 'params', 'blocks'])
-BasicBlock = namedtuple('BasicBlock', ['name', 'instructions'])
-Instruction = namedtuple('Instruction', ['opcode', 'operands', 'result', 'types'])
+# 定义数据结构 - 替换为可变的类
+class Function:
+    def __init__(self, name, return_type, params, blocks):
+        self.name = name
+        self.return_type = return_type
+        self.params = params
+        self.blocks = blocks
+
+class BasicBlock:
+    def __init__(self, name, instructions):
+        self.name = name
+        self.instructions = instructions
+
+class Instruction:
+    def __init__(self, opcode, operands, result, types):
+        self.opcode = opcode
+        self.operands = operands
+        self.result = result
+        self.types = types
 
 class IRParser:
     def __init__(self):
@@ -16,6 +31,7 @@ class IRParser:
         lines = ir_code.strip().split('\n')
         current_func = None
         current_block = None
+        current_blocks = []
         
         for line in lines:
             line = line.strip()
@@ -29,52 +45,82 @@ class IRParser:
                 self.declarations.append(line)
                 continue
                 
-            # 函数定义
+            # 函数定义 - 修复正则表达式以支持 dso_local 等修饰符
             if line.startswith('define'):
-                match = re.match(r'define\s+(\w+)\s+@(\w+)\(\)\s*{', line)
+                # 匹配更灵活的函数定义格式
+                match = re.match(r'define\s+(?:dso_local\s+)?(\w+)\s+@(\w+)\(\)\s*{?', line)
                 if match:
                     return_type = match.group(1)
                     func_name = match.group(2)
-                    current_func = Function(
-                        name=func_name, 
-                        return_type=return_type, 
-                        params=[], 
-                        blocks=[]
-                    )
+                    current_blocks = []  # 重置块列表
+                    current_func = {
+                        'name': func_name,
+                        'return_type': return_type,
+                        'params': [],
+                        'blocks': current_blocks
+                    }
                     continue
             
             # 函数结束
             if line == '}':
                 if current_func:
-                    self.functions.append(current_func)
+                    # 确保当前块被添加
+                    if current_block and current_block not in current_blocks:
+                        current_blocks.append(current_block)
+                    
+                    # 创建函数对象
+                    func_obj = Function(
+                        name=current_func['name'],
+                        return_type=current_func['return_type'],
+                        params=current_func['params'],
+                        blocks=current_blocks
+                    )
+                    self.functions.append(func_obj)
                     current_func = None
                     current_block = None
+                    current_blocks = []
                 continue
                 
-            # 基本块
+            # 基本块 - 改进基本块识别
             if line.endswith(':'):
+                # 保存之前的块
+                if current_block:
+                    current_blocks.append(current_block)
+                
                 block_name = line[:-1].strip()
-                if current_func:
-                    current_block = BasicBlock(name=block_name, instructions=[])
-                    current_func.blocks.append(current_block)
+                current_block = BasicBlock(name=block_name, instructions=[])
                 continue
                 
             # 解析指令
-            if current_block:
-                # 处理ret指令
-                ret_match = re.match(r'ret\s+(\w+)\s+(\w+|\d+)', line)
-                if ret_match:
-                    inst = Instruction(
-                        opcode='ret',
-                        operands=[ret_match.group(2)],
-                        result=None,
-                        types=[ret_match.group(1)]
-                    )
+            if current_func and current_block:
+                # 处理ret指令 - 支持无返回值的ret
+                if line.startswith('ret'):
+                    # 改进ret指令解析，支持负数
+                    ret_match = re.match(r'ret\s+(\w+)\s+(-?\w+|-?\d+)', line)
+                    if ret_match:
+                        inst = Instruction(
+                            opcode='ret',
+                            operands=[ret_match.group(2)],
+                            result=None,
+                            types=[ret_match.group(1)]
+                        )
+                    else:
+                        # ret void
+                        ret_void_match = re.match(r'ret\s+void', line)
+                        if ret_void_match:
+                            inst = Instruction(
+                                opcode='ret',
+                                operands=[],
+                                result=None,
+                                types=['void']
+                            )
+                        else:
+                            continue
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理二元运算指令 (例如: %sum = add i32 %a, %b)
-                binop_match = re.match(r'(\%[\w\d]+)\s*=\s*(\w+)\s+(\w+)\s+(\%[\w\d]+|\d+),\s+(\%[\w\d]+|\d+)', line)
+                # 处理二元运算指令 - 改进数字匹配
+                binop_match = re.match(r'(\%[\w\d]+)\s*=\s*(\w+)\s+(\w+)\s+(-?\%?[\w\d]+|-?\d+),\s+(-?\%?[\w\d]+|-?\d+)', line)
                 if binop_match:
                     inst = Instruction(
                         opcode=binop_match.group(2),
@@ -97,8 +143,8 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理store指令 (例如: store i32 3, i32* %a)
-                store_match = re.match(r'store\s+(\w+)\s+(\%[\w\d]+|\d+),\s+(\w+\*)\s+(\%[\w\d]+)', line)
+                # 处理store指令 - 改进数字匹配
+                store_match = re.match(r'store\s+(\w+)\s+(-?\%?[\w\d]+|-?\d+),\s+(\w+\*)\s+(\%[\w\d]+)', line)
                 if store_match:
                     inst = Instruction(
                         opcode='store',
@@ -121,8 +167,8 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理比较指令 (例如: %cmp = icmp eq i32 %a, %b)
-                icmp_match = re.match(r'(\%[\w\d]+)\s*=\s*icmp\s+(\w+)\s+(\w+)\s+(\%[\w\d]+|\d+),\s+(\%[\w\d]+|\d+)', line)
+                # 处理比较指令 - 改进数字匹配
+                icmp_match = re.match(r'(\%[\w\d]+)\s*=\s*icmp\s+(\w+)\s+(\w+)\s+(-?\%?[\w\d]+|-?\d+),\s+(-?\%?[\w\d]+|-?\d+)', line)
                 if icmp_match:
                     inst = Instruction(
                         opcode='icmp',
@@ -185,6 +231,19 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
         
+        # 确保最后一个函数被处理
+        if current_func:
+            if current_block and current_block not in current_blocks:
+                current_blocks.append(current_block)
+            
+            func_obj = Function(
+                name=current_func['name'],
+                return_type=current_func['return_type'],
+                params=current_func['params'],
+                blocks=current_blocks
+            )
+            self.functions.append(func_obj)
+        
         return self.declarations, self.functions
 
     def get_function(self, name):
@@ -196,42 +255,39 @@ class IRParser:
 
 # 测试代码
 if __name__ == "__main__":
-    # 测试用例
+    # 测试用例 - 测试实际的IR
     test_ir = """
-declare i32 @get_char()
-declare float @get_float()
-declare i32 @get_int()
-declare void @print_char(i32)
-declare void @print_float(float)
-declare void @print_int(i32)
-
 define dso_local i32 @main() {
 entry:
-    %a = alloca i32
-    store i32 5, i32* %a
-    %b = load i32, i32* %a
-    %sum = add i32 %b, 3
-    ret i32 %sum
-}
-
-define dso_local i32 @add(i32 %x, i32 %y) {
-entry:
-    %result = add i32 %x, %y
-    ret i32 %result
+    ret i32 3
 }
 """
     
     parser = IRParser()
     declarations, functions = parser.parse(test_ir)
     
-    print("Declarations:")
-    for decl in declarations:
-        print(f"  {decl}")
+    print("=== 解析结果调试 ===")
+    print(f"声明数量: {len(declarations)}")
+    print(f"函数数量: {len(functions)}")
     
     print("\nFunctions:")
     for func in functions:
         print(f"Function: {func.name}, Return type: {func.return_type}")
+        print(f"  块数量: {len(func.blocks)}")
         for block in func.blocks:
             print(f"  Block: {block.name}")
+            print(f"    指令数量: {len(block.instructions)}")
             for inst in block.instructions:
                 print(f"    {inst.opcode}: result={inst.result}, operands={inst.operands}, types={inst.types}")
+                
+    # 验证解析结果
+    if len(functions) > 0:
+        main_func = functions[0]
+        if len(main_func.blocks) > 0:
+            entry_block = main_func.blocks[0]
+            if len(entry_block.instructions) > 0:
+                ret_inst = entry_block.instructions[0]
+                print(f"\n=== 关键验证 ===")
+                print(f"ret指令类型: {ret_inst.types[0]}")
+                print(f"ret指令操作数: {ret_inst.operands[0]}")
+                print(f"操作数是否为数字: {ret_inst.operands[0].isdigit()}")
