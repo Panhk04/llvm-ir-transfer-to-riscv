@@ -262,7 +262,13 @@ class OptimizedLLVMIRTranslator:
         self.label_map = {}
         for func in functions:
             for block in func.blocks:
-                self.label_map[block.name] = f".{func.name}_{block.name[1:]}"
+                # 修复标签映射：基本块名称格式为"b1"，需要映射%b1格式的引用
+                block_ref = f"%{block.name}"  # 添加%前缀
+                asm_label = f".{func.name}_{block.name}"  # 汇编标签格式
+                self.label_map[block_ref] = asm_label
+                
+                # 同时也映射不带%的格式，以防万一
+                self.label_map[block.name] = asm_label
     
     def _extract_global_variables(self, ir_code):
         """从LLVM IR代码中提取全局变量声明 - 支持数组类型"""
