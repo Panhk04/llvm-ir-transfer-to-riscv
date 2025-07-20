@@ -232,14 +232,14 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理比较指令 - 改进数字匹配
+                # 处理比较指令 - 修复icmp指令解析格式
                 icmp_match = re.match(r'(\%[\w\d]+)\s*=\s*icmp\s+(\w+)\s+(\w+)\s+(-?\%?[\w\d]+|-?\d+),\s+(-?\%?[\w\d]+|-?\d+)', line)
                 if icmp_match:
                     inst = Instruction(
                         opcode='icmp',
-                        operands=[icmp_match.group(4), icmp_match.group(5)],
+                        operands=[icmp_match.group(2), icmp_match.group(4), icmp_match.group(5)],  # 修复：比较条件+两个操作数
                         result=icmp_match.group(1),
-                        types=[icmp_match.group(3), icmp_match.group(2)]
+                        types=[icmp_match.group(3)]  # 修复：只保留数据类型
                     )
                     current_block.instructions.append(inst)
                     continue

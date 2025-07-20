@@ -574,10 +574,16 @@ class InstructionTranslator:
         riscv_instructions = []
         op = instruction.opcode
         result = instruction.result
-        cond = instruction.operands[0]
-        op1 = instruction.operands[1]
-        op2 = instruction.operands[2]
-        data_type = get_data_type(instruction.types[1])
+        cond = instruction.operands[0]  # 现在比较条件在operands[0]
+        op1 = instruction.operands[1]   # 第一个操作数在operands[1]
+        op2 = instruction.operands[2]   # 第二个操作数在operands[2]
+        
+        # 修复索引越界问题：比较指令的数据类型在types[0]
+        if instruction.types and len(instruction.types) > 0:
+            data_type = get_data_type(instruction.types[0])
+        else:
+            # 如果没有类型信息，默认为i32
+            data_type = DataType.I32
         
         dest_reg_or_stack = self.allocator.allocate_register(result, DataType.I1, False)
         
