@@ -58,7 +58,7 @@ class RegisterAllocator:
                         self.liveness[op]["use"].append(inst)
     
     def allocate_register(self, virtual_reg, data_type, is_float=False):
-        """为虚拟寄存器分配物理寄存器"""
+        """为虚拟寄存器分配物理寄存器 - 修复寄存器重用冲突"""
         if virtual_reg in self.reg_map:
             return self.reg_map[virtual_reg]
         
@@ -68,7 +68,10 @@ class RegisterAllocator:
         elif data_type in [DataType.F32, DataType.F64]:
             is_float = True
         
-        # 优先尝试分配空闲寄存器，但排除s0（帧指针）
+        # 获取当前正在使用的物理寄存器列表
+        currently_used_regs = set(reg for reg in self.reg_map.values() if not '(sp)' in reg)
+        
+        # 优先尝试分配空闲寄存器，但排除s0（帧指针）和当前正在使用的寄存器
         if is_float:
             reg_pool = self.float_regs
         else:
@@ -77,8 +80,16 @@ class RegisterAllocator:
             available_saved_regs = [reg for reg in self.saved_regs if reg != 's0']
             reg_pool = available_temp_regs + available_saved_regs
         
+        # 第一优先级：完全空闲的寄存器
         for reg in reg_pool:
-            if not self.reg_in_use[reg]:
+            if not self.reg_in_use[reg] and reg not in currently_used_regs:
+                self.reg_map[virtual_reg] = reg
+                self.reg_in_use[reg] = True
+                return reg
+        
+        # 第二优先级：虽然标记为使用但没有存储重要虚拟寄存器的寄存器
+        for reg in reg_pool:
+            if reg not in currently_used_regs:
                 self.reg_map[virtual_reg] = reg
                 self.reg_in_use[reg] = True
                 return reg
