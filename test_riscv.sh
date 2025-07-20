@@ -288,36 +288,52 @@ check_tools() {
 # Run tool check
 check_tools
 
-# Run detailed tests for selected cases
-test_cases=()
+# Define all test cases (00 to 32)
+all_test_cases=($(seq -f "%02g" 0 32))
 
-# If arguments provided, test specific cases
+# If arguments provided, test specific cases; otherwise test all
 if [ $# -gt 0 ]; then
     test_cases=("$@")
+    echo "Running specific test cases: ${test_cases[*]}"
 else
-    # Default: test first few cases for demonstration
-    test_cases=("00" "01" "02" "03")
+    test_cases=("${all_test_cases[@]}")
+    echo "Running all 33 test cases (00-32)"
 fi
 
-echo "Selected test cases: ${test_cases[*]}"
-echo
-
+total_tests=${#test_cases[@]}
+current_test=1
 passed=0
 failed=0
 
+echo
+echo "Starting RISC-V translation tests..."
+echo "========================================"
+echo
+
+# Run detailed tests for selected cases
 for test_case in "${test_cases[@]}"; do
+    echo ">>> [Test $current_test/$total_tests] Starting test: $test_case"
+    echo "------------------------------------------------------------"
+    
     if run_detailed_test "$test_case"; then
+        echo "✅ [Test $current_test/$total_tests] PASSED: $test_case"
         ((passed++))
     else
+        echo "❌ [Test $current_test/$total_tests] FAILED: $test_case"
         ((failed++))
     fi
-    echo
-    echo "========================================"
+    
+    current_test=$((current_test + 1))
+    echo "------------------------------------------------------------"
     echo
 done
 
+echo "========================================"
 echo "=== RISC-V Translation Test Complete ==="
-echo "Passed: $passed, Failed: $failed"
+echo "========================================"
+echo "Total tests: $total_tests"
+echo "Passed: $passed"
+echo "Failed: $failed"
 echo
 
 # Show test summary
@@ -339,4 +355,7 @@ else
     echo
     echo "⚠️  Some tests failed, please check detailed information in corresponding test directories"
     echo "Failed tests will have TEST_FAILED file and diff.txt difference file"
+    echo "First failed test: $(ls test_results/*/TEST_FAILED 2>/dev/null | head -1)"
 fi
+
+exit $failed
