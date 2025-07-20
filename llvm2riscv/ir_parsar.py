@@ -268,24 +268,28 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理函数调用 (例如: %result = call i32 @add(i32 %a, i32 %b))
-                call_match = re.match(r'(\%[\w\d]+)?\s*=\s*call\s+(\w+)\s+@(\w+)\((.+)\)', line)
+                # 处理函数调用 - 修复无参数函数调用的解析
+                # 支持两种格式：
+                # 1. 有参数: %result = call i32 @add(i32 %a, i32 %b)
+                # 2. 无参数: %v3 = call i32 @defn()
+                call_match = re.match(r'(\%[\w\d]+)?\s*=\s*call\s+(\w+)\s+@(\w+)\(([^)]*)\)', line)
                 if call_match:
                     result_var = call_match.group(1)
                     return_type = call_match.group(2)
                     func_name = call_match.group(3)
-                    args_str = call_match.group(4)
+                    args_str = call_match.group(4).strip()
                     
-                    # 解析参数
+                    # 解析参数（如果有的话）
                     args = []
                     arg_types = []
-                    if args_str:
+                    if args_str:  # 只有在有参数时才解析
                         arg_parts = [arg.strip() for arg in args_str.split(',')]
                         for arg in arg_parts:
-                            type_val = arg.split()
-                            if len(type_val) == 2:
-                                arg_types.append(type_val[0])
-                                args.append(type_val[1])
+                            if arg:  # 确保参数不为空
+                                type_val = arg.split()
+                                if len(type_val) == 2:
+                                    arg_types.append(type_val[0])
+                                    args.append(type_val[1])
                     
                     inst = Instruction(
                         opcode='call',
