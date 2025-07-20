@@ -93,58 +93,47 @@ class IRParser:
                 
             # 解析指令
             if current_func and current_block:
-                # 处理getelementptr指令 - 完全重写以正确解析两种模式
+                # 处理getelementptr指令 - 使用更简单有效的解析方法
                 if 'getelementptr' in line and '=' in line:
                     result_var = line.split('=')[0].strip()
                     
-                    # 解析getelementptr的完整语法
-                    # 模式1: getelementptr [4 x [2 x i32]], [4 x [2 x i32]]* %ptr, i32 0, i32 row, i32 col
-                    # 模式2: getelementptr i32, i32* %ptr, i32 offset
-                    
-                    # 查找基础指针（%开头的变量）
-                    ptr_vars = re.findall(r'(\%[\w\d]+)', line)
-                    if len(ptr_vars) < 2:  # 至少需要结果变量和基础指针
-                        continue
+                    # 使用简单匹配提取关键信息
+                    simple_match = re.match(r'(%[\w\d]+)\s*=\s*getelementptr\s+inbounds\s+(.+)', line)
+                    if simple_match:
+                        rest_content = simple_match.group(2)  # [5 x i32], [5 x i32]* @g_a, i32 0, i32 4
                         
-                    base_ptr = ptr_vars[1]  # 第二个是基础指针
-                    
-                    # 判断是哪种模式
-                    if '[' in line and 'x' in line and line.count('i32') > 2:
-                        # 模式1: 数组索引模式 - 有数组类型声明且多个i32索引
-                        # 提取所有i32索引
-                        indices = re.findall(r'i32\s+(-?\d+)', line)
-                        
-                        # 保存类型信息
-                        array_type_match = re.search(r'\[([^\]]+)\]', line)
-                        if array_type_match:
-                            base_type = f"[{array_type_match.group(1)}]"
+                        # 查找基址指针（@开头的全局变量或%开头的局部变量）
+                        base_ptr = None
+                        if '@' in rest_content:
+                            # 全局变量
+                            global_match = re.search(r'(@[\w\d_]+)', rest_content)
+                            if global_match:
+                                base_ptr = global_match.group(1)
                         else:
-                            base_type = 'array'
+                            # 局部变量
+                            local_match = re.search(r'(%[\w\d]+)', rest_content)
+                            if local_match:
+                                base_ptr = local_match.group(1)
                         
-                        inst = Instruction(
-                            opcode='getelementptr',
-                            operands=[base_ptr] + indices,
-                            result=result_var,
-                            types=[base_type, 'array_index']  # 标记为数组索引模式
-                        )
-                    else:
-                        # 模式2: 指针偏移模式 - 简单的i32指针加偏移
-                        # 只提取最后一个i32数字作为偏移
-                        offset_match = re.search(r'i32\s+(-?\d+)(?!.*i32)', line)  # 找最后一个i32数字
-                        if offset_match:
-                            offset = offset_match.group(1)
-                        else:
-                            offset = '0'
-                        
-                        inst = Instruction(
-                            opcode='getelementptr',
-                            operands=[base_ptr, offset],
-                            result=result_var,
-                            types=['i32', 'pointer_offset']  # 标记为指针偏移模式
-                        )
-                    
-                    current_block.instructions.append(inst)
-                    continue
+                        if base_ptr:
+                            # 提取所有i32索引
+                            indices = re.findall(r'i32\s+(-?\d+)', rest_content)
+                            
+                            # 提取数组类型信息
+                            array_type_match = re.search(r'\[([^\]]+)\]', rest_content)
+                            if array_type_match:
+                                element_type = f"[{array_type_match.group(1)}]"
+                            else:
+                                element_type = 'unknown_array'
+                            
+                            inst = Instruction(
+                                opcode='getelementptr',
+                                operands=[base_ptr] + indices,
+                                result=result_var,
+                                types=[element_type, 'global_array' if base_ptr.startswith('@') else 'local_array']
+                            )
+                            current_block.instructions.append(inst)
+                            continue
                 
                 # 处理ret指令 - 支持变量和立即数返回值
                 if line.startswith('ret'):

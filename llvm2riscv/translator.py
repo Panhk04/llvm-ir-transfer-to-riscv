@@ -199,12 +199,16 @@ class OptimizedLLVMIRTranslator:
         return riscv_code
     
     def _generate_data_section(self, global_vars):
-        """生成数据段"""
+        """生成数据段 - 支持数组类型"""
         data_section = [".data"]
         for var_name, var_type, var_value in global_vars:
             data_section.append(f".globl {var_name}")
             data_section.append(f"{var_name}:")
-            if var_type == 'i32':
+            
+            if var_type.startswith('['):
+                # 数组类型处理：[5 x i32] [i32 0, i32 1, i32 2, i32 3, i32 4]
+                self._generate_array_data(data_section, var_type, var_value)
+            elif var_type == 'i32':
                 data_section.append(f"    .word {var_value}")
             elif var_type == 'i64':
                 data_section.append(f"    .dword {var_value}")
@@ -217,6 +221,35 @@ class OptimizedLLVMIRTranslator:
         data_section.append("")  # 添加空行分隔
         return data_section
     
+    def _generate_array_data(self, data_section, array_type, array_value):
+        """生成数组数据"""
+        # 解析数组初始值：[i32 0, i32 1, i32 2, i32 3, i32 4]
+        if array_value.startswith('[') and array_value.endswith(']'):
+            # 移除外层括号
+            inner_content = array_value[1:-1].strip()
+            # 分割各个元素：i32 0, i32 1, i32 2, i32 3, i32 4
+            elements = inner_content.split(',')
+            
+            for element in elements:
+                element = element.strip()
+                # 解析每个元素：i32 0
+                parts = element.split()
+                if len(parts) >= 2:
+                    elem_type = parts[0]
+                    elem_value = parts[1]
+                    
+                    if elem_type == 'i32':
+                        data_section.append(f"    .word {elem_value}")
+                    elif elem_type == 'i64':
+                        data_section.append(f"    .dword {elem_value}")
+                    elif elem_type == 'float':
+                        data_section.append(f"    .float {elem_value}")
+                    else:
+                        data_section.append(f"    .word {elem_value}")  # 默认
+        else:
+            # 如果不是标准格式，使用默认处理
+            data_section.append(f"    .word 0")  # 默认零初始化
+    
     def _build_label_map(self, functions):
         """构建基本块标签映射"""
         self.label_map = {}
@@ -225,18 +258,33 @@ class OptimizedLLVMIRTranslator:
                 self.label_map[block.name] = f".{func.name}_{block.name[1:]}"
     
     def _extract_global_variables(self, ir_code):
-        """从LLVM IR代码中提取全局变量声明"""
+        """从LLVM IR代码中提取全局变量声明 - 支持数组类型"""
         global_vars = []
         lines = ir_code.strip().split('\n')
         
         for line in lines:
             line = line.strip()
-            # 匹配全局变量声明: @g_b = dso_local global i32 3
-            global_match = re.match(r'@(\w+)\s*=\s*(?:dso_local\s+)?global\s+(\w+)\s+(.+)', line)
+            # 改进的正则表达式，支持数组类型：@g_a = dso_local global [5 x i32] [i32 0, i32 1, i32 2, i32 3, i32 4]
+            global_match = re.match(r'@(\w+)\s*=\s*(?:dso_local\s+)?global\s+(.+)', line)
             if global_match:
                 var_name = global_match.group(1)
-                var_type = global_match.group(2)
-                var_value = global_match.group(3)
-                global_vars.append((var_name, var_type, var_value))
+                rest_content = global_match.group(2)
+                
+                # 解析类型和初始值
+                if rest_content.startswith('['):
+                    # 数组类型：[5 x i32] [i32 0, i32 1, i32 2, i32 3, i32 4]
+                    # 找到第一个 ] 后面的空格，分离类型和初始值
+                    type_end = rest_content.find(']')
+                    if type_end != -1:
+                        var_type = rest_content[:type_end + 1]  # [5 x i32]
+                        var_value = rest_content[type_end + 1:].strip()  # [i32 0, i32 1, i32 2, i32 3, i32 4]
+                        global_vars.append((var_name, var_type, var_value))
+                else:
+                    # 简单类型：i32 3
+                    parts = rest_content.split(' ', 1)
+                    if len(parts) >= 2:
+                        var_type = parts[0]
+                        var_value = parts[1]
+                        global_vars.append((var_name, var_type, var_value))
         
         return global_vars

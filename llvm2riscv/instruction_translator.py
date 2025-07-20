@@ -349,7 +349,14 @@ class InstructionTranslator:
 
         # 1. 获取基础指针地址
         base_reg = None
-        if base_ptr in self.allocator.stack_frame:
+        if base_ptr.startswith('@'):
+            # 全局变量地址
+            global_name = base_ptr[1:]  # 去掉@前缀
+            temp_reg = self.allocator.get_temp_register()
+            riscv_instructions.append(f"    lui {temp_reg}, %hi({global_name})")
+            riscv_instructions.append(f"    addi {temp_reg}, {temp_reg}, %lo({global_name})")
+            base_reg = temp_reg
+        elif base_ptr in self.allocator.stack_frame:
             stack_offset = self.allocator.stack_frame[base_ptr]
             temp_reg = self.allocator.get_temp_register()
             riscv_instructions.append(f"    addi {temp_reg}, sp, {stack_offset}")
