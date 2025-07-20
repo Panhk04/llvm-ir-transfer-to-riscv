@@ -111,14 +111,14 @@ class IRParser:
                 
             # 解析指令
             if current_func and current_block:
-                # 处理getelementptr指令 - 使用更简单有效的解析方法
+                # 处理getelementptr指令 - 修复变量索引解析
                 if 'getelementptr' in line and '=' in line:
                     result_var = line.split('=')[0].strip()
                     
                     # 使用简单匹配提取关键信息
                     simple_match = re.match(r'(%[\w\d]+)\s*=\s*getelementptr\s+inbounds\s+(.+)', line)
                     if simple_match:
-                        rest_content = simple_match.group(2)  # [5 x i32], [5 x i32]* @g_a, i32 0, i32 4
+                        rest_content = simple_match.group(2)  # [6 x i32], [6 x i32]* @g_arr, i32 0, i32 %v9
                         
                         # 查找基址指针（@开头的全局变量或%开头的局部变量）
                         base_ptr = None
@@ -134,8 +134,12 @@ class IRParser:
                                 base_ptr = local_match.group(1)
                         
                         if base_ptr:
-                            # 提取所有i32索引
-                            indices = re.findall(r'i32\s+(-?\d+)', rest_content)
+                            # 修复：提取所有索引（包括数字和变量）
+                            # 匹配 i32 数字 或 i32 %变量
+                            indices = []
+                            index_matches = re.findall(r'i32\s+([-\d]+|%[\w\d]+)', rest_content)
+                            for match in index_matches:
+                                indices.append(match)
                             
                             # 提取数组类型信息
                             array_type_match = re.search(r'\[([^\]]+)\]', rest_content)
