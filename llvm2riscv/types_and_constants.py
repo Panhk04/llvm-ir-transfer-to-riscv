@@ -29,24 +29,26 @@ class RISCVRegisters:
     FLOAT_REGS = ['ft0', 'ft1', 'ft2', 'ft3', 'ft4', 'ft5', 'ft6', 'ft7',
                   'fa0', 'fa1', 'fa2', 'fa3', 'fa4', 'fa5', 'fa6', 'fa7']
 
-# 浮点运算映射
-FLOAT_OPS_MAP = {
-    'fadd': 'fadd.s',
-    'fsub': 'fsub.s',
-    'fmul': 'fmul.s',
-    'fdiv': 'fdiv.s',
-    'fcmp': 'feq.s'
-}
-
 # 整数运算映射
 INT_OPS_MAP = {
     'add': 'add',
     'sub': 'sub', 
     'mul': 'mul',
     'sdiv': 'div',
+    'srem': 'rem',  # 添加有符号取模运算
     'and': 'and',
     'or': 'or',
     'xor': 'xor'
+}
+
+# 浮点运算映射
+FLOAT_OPS_MAP = {
+    'fadd': 'fadd.s',
+    'fsub': 'fsub.s',
+    'fmul': 'fmul.s',
+    'fdiv': 'fdiv.s',
+    'frem': 'frem.s',  # 添加浮点取模运算
+    'fcmp': 'feq.s'
 }
 
 # 移位运算映射

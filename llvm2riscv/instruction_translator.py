@@ -37,8 +37,8 @@ class InstructionTranslator:
             return self._translate_memory(instruction)
         
         # 算术指令
-        elif opcode in ['add', 'sub', 'mul', 'sdiv', 'and', 'or', 'xor', 
-                        'fadd', 'fsub', 'fmul', 'fdiv']:
+        elif opcode in ['add', 'sub', 'mul', 'sdiv', 'srem', 'and', 'or', 'xor', 
+                        'fadd', 'fsub', 'fmul', 'fdiv', 'frem']:
             return self._translate_arithmetic(instruction)
         
         # 移位指令
@@ -389,7 +389,7 @@ class InstructionTranslator:
             riscv_instructions.append(f"    # ERROR: Failed to resolve base pointer {base_ptr}")
             return riscv_instructions
 
-        # 2. 解析数组类型和维度 - 修复递归解析
+        # 2. 解析数组类型和维度 - 修复递归提取逻辑
         array_type_str = instruction.types[0]
         dims = []
         current_str = array_type_str
