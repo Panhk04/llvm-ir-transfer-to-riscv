@@ -239,8 +239,22 @@ class InstructionTranslator:
             # 处理存储的值
             value_reg = self._get_or_load_operand(value, data_type, riscv_instructions)
             
-            # 处理目标指针 - 修复alloca变量的存储逻辑
-            if dest_ptr in self.allocator.stack_frame:
+            # 处理目标指针 - 添加全局变量存储支持
+            if dest_ptr.startswith('@'):
+                # 全局变量存储
+                global_name = dest_ptr[1:]  # 去掉@前缀
+                riscv_instructions.append(f"    # Store to global variable {global_name}")
+                
+                # 获取全局变量地址并存储值
+                temp_reg = self.allocator.get_temp_register()
+                riscv_instructions.append(f"    lui {temp_reg}, %hi({global_name})")
+                riscv_instructions.append(f"    addi {temp_reg}, {temp_reg}, %lo({global_name})")
+                
+                # 根据数据类型选择存储指令
+                store_instr = self._get_store_instruction(data_type)
+                if value_reg:
+                    riscv_instructions.append(f"    {store_instr} {value_reg}, 0({temp_reg})")
+            elif dest_ptr in self.allocator.stack_frame:
                 # 直接存储到alloca分配的栈位置
                 stack_location = f"{self.allocator.stack_frame[dest_ptr]}(sp)"
                 store_instr = self._get_store_instruction(data_type)
@@ -637,5 +651,52 @@ class InstructionTranslator:
                 # 生成条件跳转指令
                 riscv_instructions.append(f"    bnez {cond_reg}, {true_label}")
                 riscv_instructions.append(f"    j {false_label}")
+        
+        return riscv_instructions
+    
+    def _translate_call(self, instruction):
+        """翻译函数调用指令"""
+        riscv_instructions = []
+        func_name = instruction.operands[0]
+        args = instruction.operands[1:]
+        result = instruction.result
+        return_type = get_data_type(instruction.types[0]) if instruction.types else DataType.I32
+        
+        # 保存调用者保存的寄存器（caller-saved registers）
+        riscv_instructions.append("    # Save caller-saved registers")
+        
+        # 准备参数 - RISC-V调用约定：前8个整数参数使用a0-a7
+        param_regs = ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
+        
+        for i, arg in enumerate(args):
+            if i < len(param_regs):
+                # 参数放入参数寄存器
+                arg_reg = self._get_or_load_operand(arg, DataType.I32, riscv_instructions)
+                if arg_reg != param_regs[i]:
+                    riscv_instructions.append(f"    mv {param_regs[i]}, {arg_reg}")
+            else:
+                # 超过8个参数需要通过栈传递（暂不实现）
+                riscv_instructions.append(f"    # TODO: Stack parameter {i}")
+        
+        # 生成函数调用
+        riscv_instructions.append(f"    call {func_name}")
+        
+        # 处理返回值
+        if result:
+            is_float = return_type in [DataType.F32, DataType.F64]
+            dest_reg_or_stack = self.allocator.allocate_register(result, return_type, is_float)
+            
+            if is_float:
+                # 浮点返回值在fa0
+                if '(sp)' in dest_reg_or_stack:
+                    riscv_instructions.append(f"    fsw fa0, {dest_reg_or_stack}")
+                else:
+                    riscv_instructions.append(f"    fmv.s {dest_reg_or_stack}, fa0")
+            else:
+                # 整数返回值在a0
+                if '(sp)' in dest_reg_or_stack:
+                    riscv_instructions.append(f"    sw a0, {dest_reg_or_stack}")
+                else:
+                    riscv_instructions.append(f"    mv {dest_reg_or_stack}, a0")
         
         return riscv_instructions

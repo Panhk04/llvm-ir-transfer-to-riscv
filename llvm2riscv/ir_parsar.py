@@ -45,18 +45,36 @@ class IRParser:
                 self.declarations.append(line)
                 continue
                 
-            # 函数定义 - 修复正则表达式以支持 dso_local 等修饰符
+            # 函数定义 - 修复正则表达式以支持带参数的函数
             if line.startswith('define'):
-                # 匹配更灵活的函数定义格式
-                match = re.match(r'define\s+(?:dso_local\s+)?(\w+)\s+@(\w+)\(\)\s*{?', line)
+                # 匹配更灵活的函数定义格式，支持带参数的函数
+                # 例如: define dso_local i32 @func(i32 %f0) {
+                # 或者: define dso_local i32 @main() {
+                match = re.match(r'define\s+(?:dso_local\s+)?(\w+)\s+@(\w+)\(([^)]*)\)\s*{?', line)
                 if match:
                     return_type = match.group(1)
                     func_name = match.group(2)
+                    params_str = match.group(3).strip()
+                    
+                    # 解析参数（如果有的话）
+                    params = []
+                    if params_str:
+                        # 简单解析参数，例如: "i32 %f0, float %f1"
+                        param_parts = [p.strip() for p in params_str.split(',')]
+                        for param in param_parts:
+                            if param:
+                                # 提取参数类型和名称
+                                param_match = re.match(r'(\w+)\s+(%\w+)', param)
+                                if param_match:
+                                    param_type = param_match.group(1)
+                                    param_name = param_match.group(2)
+                                    params.append((param_type, param_name))
+                    
                     current_blocks = []  # 重置块列表
                     current_func = {
                         'name': func_name,
                         'return_type': return_type,
-                        'params': [],
+                        'params': params,
                         'blocks': current_blocks
                     }
                     continue
@@ -187,8 +205,8 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理store指令 - 改进数字匹配
-                store_match = re.match(r'store\s+(\w+)\s+(-?\%?[\w\d]+|-?\d+),\s+(\w+\*)\s+(\%[\w\d]+)', line)
+                # 处理store指令 - 修复全局变量存储解析
+                store_match = re.match(r'store\s+(\w+)\s+(-?\%?[\w\d]+|-?\d+),\s+(\w+\*)\s+(\%[\w\d]+|@[\w\d_]+)', line)
                 if store_match:
                     inst = Instruction(
                         opcode='store',

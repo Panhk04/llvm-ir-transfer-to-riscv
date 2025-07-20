@@ -66,6 +66,9 @@ class OptimizedLLVMIRTranslator:
         # 预处理所有alloca指令以建立stack_frame映射
         self._preprocess_alloca_instructions(function)
         
+        # 处理函数参数 - 新增参数处理逻辑
+        self._process_function_parameters(function)
+        
         # 计算所需的栈空间，加上额外的临时变量空间
         base_stack_size = self.allocator.get_stack_size()
         # 为临时变量和溢出寄存器预留更多空间
@@ -88,6 +91,10 @@ class OptimizedLLVMIRTranslator:
         
         # 更新分配器的栈空间信息，避免冲突
         self.allocator.reserved_stack_top = aligned_size - 16  # 为ra/s0保留的空间
+        
+        # 保存函数参数到栈上 - 新增参数保存逻辑
+        param_save_code = self._generate_parameter_save_code(function)
+        riscv_code.extend(param_save_code)
         
         # 添加零初始化代码（如果有未初始化的数组）
         zero_init_code = self._generate_array_zero_initialization()
@@ -288,3 +295,50 @@ class OptimizedLLVMIRTranslator:
                         global_vars.append((var_name, var_type, var_value))
         
         return global_vars
+    
+    def _process_function_parameters(self, function):
+        """处理函数参数，将参数映射到栈位置"""
+        if not function.params:
+            return
+        
+        # RISC-V调用约定：前8个整数参数使用a0-a7寄存器
+        param_regs = ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
+        
+        for i, (param_type, param_name) in enumerate(function.params):
+            # 为每个参数分配栈空间
+            param_size = 4  # 假设所有参数都是4字节（i32）
+            self.allocator.stack_offset += param_size
+            
+            # 确保栈对齐
+            if self.allocator.stack_offset % 4 != 0:
+                self.allocator.stack_offset = (self.allocator.stack_offset + 3) // 4 * 4
+            
+            stack_offset = self.allocator.stack_offset
+            
+            # 将参数名映射到栈位置
+            self.allocator.stack_frame[param_name] = stack_offset
+            
+            print(f"DEBUG: Function parameter {param_name} mapped to stack offset {stack_offset}")
+    
+    def _generate_parameter_save_code(self, function):
+        """生成保存函数参数到栈的代码"""
+        riscv_code = []
+        
+        if not function.params:
+            return riscv_code
+        
+        # RISC-V调用约定：前8个整数参数使用a0-a7寄存器
+        param_regs = ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
+        
+        riscv_code.append("    # Save function parameters to stack")
+        
+        for i, (param_type, param_name) in enumerate(function.params):
+            if i < len(param_regs):
+                # 从参数寄存器保存到栈
+                stack_offset = self.allocator.stack_frame[param_name]
+                riscv_code.append(f"    sw {param_regs[i]}, {stack_offset}(sp)")
+            else:
+                # 超过8个参数的情况（暂不完全实现）
+                riscv_code.append(f"    # TODO: Handle parameter {i} from stack")
+        
+        return riscv_code
