@@ -33,7 +33,9 @@ test_riscv.sh                 # 测试脚本
 
 实现了LLVM IR到RISC-V的完整转换逻辑
    - 调用ir_parser.py解析LLVM IR
+   - 调用optimizer.py进行应用优化转换
    - 调用register_allocator.py进行寄存器分配
+   - 调用instruction_translator.py进行指令翻译
    - 调用riscv_emitter.py生成RISC-V代码
 
 ### 2.2.2 支持的RISC-V指令：
@@ -129,13 +131,40 @@ def _dead_code_elimination(self, function):
 
 #### 2.3.2.2 常量折叠 (Constant Folding)
 
-实现位置：_constant_folding 和 _fold_constants 方法
+实现位置：_constant_folding（遍历处理） 和 _fold_constants（折叠逻辑） 方法
 
-优化逻辑：
-  - 识别可折叠的常量表达式（包括整数和浮点运算）：
-  - 在编译时计算结果
-  - 用常量指令替换原指令
-  - 添加特殊处理来处理常量指令（_translate_constant 和 _translate_fconstant）
+
+##### 优化逻辑
+1. **识别阶段**
+   - **操作数检测**：
+     - 整数：`op.isdigit()` 或 `"-".isdigit()`
+     - 浮点：`float()`转换+异常捕获
+   - **支持操作符**：
+     ```python
+     ['add', 'sub', 'mul', 'sdiv']   # 整数
+     ['fadd', 'fsub', 'fmul', 'fdiv'] # 浮点
+     ```
+
+2. **计算阶段**
+   - 安全策略：
+     ```python
+     if op == 'sdiv' and op2 == 0:    # 整数除零
+         return None
+     if op == 'fdiv' and op2 == 0.0:  # 浮点除零
+         return None
+     ```
+
+3. **替换阶段**
+   ```python
+   # 生成伪指令示例
+   Instruction(
+       opcode='const',
+       operands=["5"],  # 计算结果
+       result="%1",
+       types=["i32"]
+   )
+   ```
+    
 
 优化代码如下：
 ``` python
@@ -200,24 +229,151 @@ def _fold_constants(self, inst):
         return None  # 无法折叠
 ```
 
-### 2.4 instruction_translator.py
+典型优化示例：
+输入：
+`%1 = add i32 2, 3`
+优化后：
+`%1 = const i32 5`
 
-#### 2.4.1 功能描述
+## 2.4 instruction_translator.py
+
+### 2.4.1 功能描述
 
 实现了LLVM IR到RISC-V指令集的翻译器
    - 支持多种指令类型（算术、内存、控制流、函数调用等）
    - 使用寄存器分配器进行寄存器分配
    - 包含详细的测试用例
 
-### 2.5 types_and_constants.py
+### 2.4.2 核心代码分析
 
-#### 2.5.1 功能描述
+```python
+def translate_instruction(self, instruction):
+    opcode = instruction.opcode
+    # 根据opcode分发到不同的翻译函数
+    if opcode == 'ret': ...
+    elif opcode in memory_ops: ...
+    ... # 其他指令类型
+```
+
+translate_instruction方法作为指令翻译的入口，根据指令操作码（opcode）将指令分发到对应的具体翻译函数，实现模块化的指令翻译过程。
+
+```python
+def _translate_ret(self, instruction):
+    # 处理void返回
+    # 处理整数返回
+    # 处理浮点返回
+    # 函数尾声（恢复ra, s0, 调整sp, ret）
+```
+
+_translate_ret方法用于返回指令翻译，其翻译LLVM的ret指令，处理无返回值(void)和有返回值（整数/浮点）的情况，并生成函数尾声代码（恢复保存的寄存器、调整栈指针和返回）。
+
+```python
+def _translate_memory(self, instruction):
+    if opcode == 'alloca': ... # 已在预处理中处理，跳过
+    elif opcode == 'load': ... # 加载全局变量或局部变量
+    elif opcode == 'store': ... # 存储到全局变量或局部变量
+```
+
+_translate_memory方法用于翻译内存相关指令（alloca, load, store）。alloca指令在预处理阶段已处理，此处跳过；load和store指令分别处理全局变量和局部变量的加载与存储，生成相应的RISC-V加载和存储指令。
+
+```python
+def _translate_arithmetic(self, instruction):
+    # 区分浮点和整数运算
+    # 处理立即数优化（特别是addi/subi）
+    # 分配目标寄存器/栈空间
+    # 生成运算指令
+```
+
+_translate_arithmetic方法用于翻译算术运算指令（整数和浮点），根据操作数类型和值进行优化（如使用addi/subi处理小立即数），并将结果存储到寄存器或栈空间。
+
+```python
+def _translate_getelementptr(self, instruction):
+    # 1. 获取基础指针
+    # 2. 解析数组类型和维度
+    # 3. 计算步长（strides）
+    # 4. 计算索引偏移
+    # 5. 计算最终地址并存储
+```
+
+_translate_getelementptr方法用于翻译LLVM的getelementptr指令，用于计算聚合类型（如数组）元素的地址。通过解析数组维度、计算步长和索引偏移，生成地址计算指令序列。
+
+```python
+def _translate_shift(self, instruction):
+    # 分配目标位置
+    # 获取操作数
+    # 生成移位指令
+```
+
+_translate_shift方法用于翻译移位指令（shl, lshr, ashr），生成对应的RISC-V移位指令（sll, srl, sra），结果存储到目标位置（寄存器或栈）。
+
+```python
+def _get_or_load_operand(self, operand, data_type, riscv_instructions):
+    # 处理立即数（整数和浮点）
+    # 处理虚拟寄存器（从寄存器或栈中加载）
+```
+
+_get_or_load_operand为操作数加载辅助函数，用于将操作数（立即数或虚拟寄存器）加载到物理寄存器中。如果是立即数，生成li或浮点加载序列；如果在栈上，生成加载指令；否则直接使用分配的寄存器。
+
+```python
+def _translate_compare(self, instruction):
+    # 处理整数比较（icmp）和浮点比较（fcmp）
+    # 根据条件码生成比较指令序列
+    # 将结果存储到目标位置
+```
+
+_translate_compare用于翻译比较指令（icmp/fcmp），根据条件码生成相应的RISC-V比较指令序列（如slt, feq等），并将比较结果（布尔值）存储到目标位置。
+
+```python
+def _translate_branch(self, instruction):
+    # 无条件跳转（直接j）
+    # 条件跳转（根据条件寄存器选择分支）
+```
+
+_translate_branch用于翻译分支指令（br），包括无条件跳转和条件跳转，利用标签映射将LLVM基本块标签转换为RISC-V标签，生成j和bnez等跳转指令。
+
+```python
+def _translate_call(self, instruction):
+    # 1. 处理参数（整数和浮点，使用a0-a7和fa0-fa7）
+    # 2. 生成call指令
+    # 3. 处理返回值
+```
+
+_translate_call用于翻译函数调用指令（call），将参数加载到约定寄存器（整数a0-a7，浮点fa0-fa7），生成call指令，并处理返回值存储。
+
+```python
+def _translate_cast(self, instruction):
+    # 处理整数到浮点（sitofp）
+    # 浮点到整数（fptosi）
+    # 其他转换（用mov简化处理）
+```
+
+_translate_cast用于翻译类型转换指令（如sitofp, fptosi等），生成相应的转换指令（如fcvt.s.w, fcvt.w.s），其他转换暂时用寄存器移动指令（mv/fmv.s）处理。
+
+```python
+def _translate_constant(self, instruction): ... # 整数常量
+def _translate_fconstant(self, instruction): ... # 浮点常量
+```
+
+_translate_constant和_translate_fconstant用于翻译常量加载指令，将整数常量或浮点常量加载到寄存器或栈中。浮点常量通过整数立即数加载再转换的方式实现。
+
+```python
+def _get_load_instruction(self, data_type): ... # 根据数据类型返回lw, lh, lb, flw等
+def _get_store_instruction(self, data_type): ... # 根据数据类型返回sw, sh, sb, fsw等
+```
+
+_get_load_instruction 和 _get_store_instruction为加载/存储指令辅助函数，根据数据类型返回相应的RISC-V加载或存储指令助记符（如整数用lw/sw，浮点用flw/fsw，不同位宽用不同指令）。
+
+总的来说，instruction_translator.py该模块实现了LLVM IR指令到RISC-V汇编指令的翻译，覆盖了常见指令类型。它依赖于寄存器分配器管理寄存器和栈空间，并利用标签映射处理分支目标。翻译过程考虑数据类型（整数/浮点）和操作数特性（立即数/变量），并针对RISC-V指令集特点进行优化（如使用addi处理小立即数）。对于复杂操作（如getelementptr），生成多条指令序列完成计算。
+
+## 2.5 types_and_constants.py
+
+### 2.5.1 功能描述
 
 定义了LLVM IR和RISC-V的数据类型和常量
    - 包含数据类型映射和常量定义
    - 支持整数、浮点数和指针类型
 
-#### 2.5.2 核心代码分析
+### 2.5.2 核心代码分析
 
 ``` python
 class Function:
@@ -245,16 +401,16 @@ class Instruction:
   - BasicBlock 类表示一个基本块，包含基本块名和指令列表；
   - Instruction 类表示一条指令，包含操作码、操作数、结果和类型。
 
-### 2.6 ir_parser.py
+## 2.6 ir_parser.py
 
-#### 2.6.1 功能描述
+### 2.6.1 功能描述
 
 实现了完整的LLVM IR解析器
    - 使用正则表达式解析各种指令类型
    - 将IR转换为结构化数据（Function, BasicBlock, Instruction）
    - 包含详细的测试用例
 
-#### 2.6.2 核心代码分析
+### 2.6.2 核心代码分析
 
 ``` python
 if line.startswith('define'):
@@ -311,16 +467,16 @@ ret void
 ```
 并将解析结果存储在 Instruction 对象中，添加到当前基本块的指令列表中。
 
-### 2.7 register_allocator.py
+## 2.7 register_allocator.py
 
-#### 2.7.1 功能描述
+### 2.7.1 功能描述
 
 实现了寄存器分配器
    - 使用线性扫描算法进行寄存器分配
    - 处理函数调用和返回
    - 包含详细的测试用例
 
-#### 2.7.2 核心代码分析
+### 2.7.2 核心代码分析
 
 ``` python
 def allocate_register(self, virtual_reg, data_type, is_float=False):
@@ -376,14 +532,110 @@ allocate_register方法用于为虚拟寄存器分配物理寄存器。首先检
 
 这样就较为简单的实现了一个合理的寄存器分配方案，当然较现代riscv汇编优化后的成果还要较大差距。
 
-### 2.8 riscv_emitter.py
+``` python
+def get_temp_register(self):
+    """获取一个临时寄存器"""
+    # 改进的临时寄存器分配，确保不使用s0（帧指针）
+    temp_candidates = ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 's1', 's2', 's3', 's4', 's5', 's6', 's7']
+        
+    # 使用轮转分配策略
+    if not hasattr(self, 'temp_register_counter'):
+        self.temp_register_counter = 0
+        
+    # 尝试找到一个未被使用的寄存器
+    for i in range(len(temp_candidates)):
+        candidate_idx = (self.temp_register_counter + i) % len(temp_candidates)
+        reg = temp_candidates[candidate_idx]
+            
+        if not self.reg_in_use.get(reg, False):
+            self.temp_register_counter = (candidate_idx + 1) % len(temp_candidates)
+            # 不要标记为永久使用，这样可以被重复使用
+            return reg
+        
+    # 如果所有寄存器都被使用，使用轮转策略强制分配（但永远不使用s0）
+    reg = temp_candidates[self.temp_register_counter % len(temp_candidates)]
+    self.temp_register_counter = (self.temp_register_counter + 1) % len(temp_candidates)
+    return reg
+```
 
-#### 2.8.1 功能描述
+get_temp_register方法用于临时寄存器分配，临时寄存器从`t0-t6`和`s1-s7`中选择（排除`s0`），使用轮询策略尝试分配空闲寄存器，如果都忙则返回下一个（可能已被占用，需要调用者注意）。
+
+``` python
+def store_to_stack_if_needed(self, result_reg, stack_location, data_type, riscv_instructions):
+    """如果目标是栈位置，将寄存器值存储到栈上"""
+    if '(sp)' in stack_location:
+        if data_type in [DataType.F32, DataType.F64]:
+            store_instr = "fsw" if data_type == DataType.F32 else "fsd"
+        else:
+            store_instr = "sw"
+        riscv_instructions.append(f"    {store_instr} {result_reg}, {stack_location}")
+        return True
+    return False
+```
+
+store_to_stack_if_needed方法用于栈存储，其检查目标位置是否是栈位置（包含`(sp)`字符串），并根据数据类型选择存储指令（浮点：fsw/fsd，整数：sw）。最后生成存储指令并添加到指令列表中。
+
+
+## 2.8 riscv_emitter.py
+
+### 2.8.1 功能描述
 
 实现了RISC-V代码生成器
    - 将结构化数据转换为RISC-V指令
    - 处理内存访问和算术运算
    - 包含详细的测试用例
+
+
+### 2.8.2 核心代码分析
+``` python
+def emit_constant(self, value, type_="i32"):
+    """发射常量到寄存器"""
+    # 分配一个临时寄存器
+    temp_reg = self.register_allocator.allocate_register(f"%const_{len(self.code)}")
+        
+    if type_ == "i32":
+        if -2048 <= value <= 2047:
+            # 使用addi指令（立即数范围：-2048到2047）
+            self.code.append(f"addi {temp_reg}, x0, {value}")
+        else:
+            # 使用lui和addi组合指令
+            high_20 = value >> 12
+            low_12 = value & 0xFFF
+            self.code.append(f"lui {temp_reg}, {high_20}")
+            self.code.append(f"addi {temp_reg}, {temp_reg}, {low_12}")
+    elif type_ == "float":
+        # 浮点常量需要特殊处理（这里简化处理）
+        self.code.append(f"# Floating point constant: {value}")
+        # 实际实现需要处理浮点立即数的存储和加载
+        
+    return temp_reg
+```
+
+emit_constant方法用于为常量分配一个临时寄存器，对于i32常量：如果值在-2048到2047之间，使用addi指令（addi rd, x0, imm）将常量加载到寄存器。否则，使用lui加载高20位，然后addi加载低12位。
+
+``` python
+def emit_binary_operation(self, op, left, right, result):
+    """发射二元操作指令"""
+    left_reg = self.register_allocator.get_register(left)
+    right_reg = self.register_allocator.get_register(right)
+    result_reg = self.register_allocator.allocate_register(result)
+
+    if op == 'add':
+        self.code.append(f"add {result_reg}, {left_reg}, {right_reg}")
+    elif op == 'sub':
+        self.code.append(f"sub {result_reg}, {left_reg}, {right_reg}")
+    elif op == 'mul':
+        self.code.append(f"mul {result_reg}, {left_reg}, {right_reg}")
+    elif op == 'sdiv':
+        self.code.append(f"div {result_reg}, {left_reg}, {right_reg}")
+    elif op == 'addf':
+        self.code.append(f"fadd.s {result_reg}, {left_reg}, {right_reg}")
+    elif op == 'subf':
+        self.code.append(f"fsub.s {result_reg}, {left_reg}, {right_reg}")
+    # 其他操作符...
+```
+
+emit_binary_operation方法获取左操作数和右操作数所在的寄存器，并为结果分配一个新的寄存器。其根据操作符生成相应的RISC-V指令，例如add、sub、mul等。注意，这里支持整数和浮点操作（例如addf对应fadd.s）。
 
 
 ## 3.1 测试方法
@@ -400,12 +652,12 @@ allocate_register方法用于为虚拟寄存器分配物理寄存器。首先检
 
 ```bash
 # 一键运行测试
-./test.riscv.sh
+./test_riscv.sh
 ```
 
 其中如果要进行对某个特定测试点的测试（以01为例），可以在终端输入：
 ```bash
-./test.riscv.sh 01
+./test_riscv.sh 01
 ```
 
 即可自动执行对测试点01的测试。
