@@ -268,11 +268,14 @@ class IRParser:
                     current_block.instructions.append(inst)
                     continue
                 
-                # 处理函数调用 - 修复无参数函数调用的解析
-                # 支持两种格式：
-                # 1. 有参数: %result = call i32 @add(i32 %a, i32 %b)
-                # 2. 无参数: %v3 = call i32 @defn()
-                call_match = re.match(r'(\%[\w\d]+)?\s*=\s*call\s+(\w+)\s+@(\w+)\(([^)]*)\)', line)
+                # 处理函数调用 - 修复void函数调用和有返回值函数调用的解析
+                # 支持三种格式：
+                # 1. 有返回值: %result = call i32 @add(i32 %a, i32 %b)
+                # 2. 无返回值: call void @print_int(i32 %v40)
+                # 3. 无参数: %v3 = call i32 @defn()
+                
+                # 先尝试匹配有返回值的函数调用
+                call_match = re.match(r'(\%[\w\d]+)\s*=\s*call\s+(\w+)\s+@(\w+)\(([^)]*)\)', line)
                 if call_match:
                     result_var = call_match.group(1)
                     return_type = call_match.group(2)
@@ -296,6 +299,33 @@ class IRParser:
                         operands=[func_name] + args,
                         result=result_var,
                         types=[return_type] + arg_types
+                    )
+                    current_block.instructions.append(inst)
+                    continue
+                
+                # 尝试匹配void函数调用（无返回值）
+                void_call_match = re.match(r'call\s+void\s+@(\w+)\(([^)]*)\)', line)
+                if void_call_match:
+                    func_name = void_call_match.group(1)
+                    args_str = void_call_match.group(2).strip()
+                    
+                    # 解析参数（如果有的话）
+                    args = []
+                    arg_types = []
+                    if args_str:  # 只有在有参数时才解析
+                        arg_parts = [arg.strip() for arg in args_str.split(',')]
+                        for arg in arg_parts:
+                            if arg:  # 确保参数不为空
+                                type_val = arg.split()
+                                if len(type_val) == 2:
+                                    arg_types.append(type_val[0])
+                                    args.append(type_val[1])
+                    
+                    inst = Instruction(
+                        opcode='call',
+                        operands=[func_name] + args,
+                        result=None,  # void函数调用没有返回值
+                        types=['void'] + arg_types
                     )
                     current_block.instructions.append(inst)
                     continue

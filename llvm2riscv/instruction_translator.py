@@ -657,6 +657,11 @@ class InstructionTranslator:
                 # 生成条件跳转指令
                 riscv_instructions.append(f"    bnez {cond_reg}, {true_label}")
                 riscv_instructions.append(f"    j {false_label}")
+        elif opcode == 'jmp':
+            # 处理无条件跳转指令
+            if len(instruction.operands) >= 1:
+                target_label = self.label_map.get(instruction.operands[0], "unknown_label")
+                riscv_instructions.append(f"    j {target_label}")
         
         return riscv_instructions
     
