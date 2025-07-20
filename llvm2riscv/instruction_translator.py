@@ -700,3 +700,67 @@ class InstructionTranslator:
                     riscv_instructions.append(f"    mv {dest_reg_or_stack}, a0")
         
         return riscv_instructions
+    
+    def _translate_constant(self, instruction):
+        """翻译整数常量指令"""
+        riscv_instructions = []
+        result = instruction.result
+        const_value = instruction.operands[0]
+        data_type = get_data_type(instruction.types[0]) if instruction.types else DataType.I32
+        
+        # 分配目标寄存器或栈位置
+        dest_reg_or_stack = self.allocator.allocate_register(result, data_type, False)
+        
+        # 加载常量到目标位置
+        if '(sp)' in dest_reg_or_stack:
+            # 目标在栈上，使用临时寄存器
+            temp_reg = self.allocator.get_temp_register()
+            riscv_instructions.append(f"    li {temp_reg}, {const_value}")
+            riscv_instructions.append(f"    sw {temp_reg}, {dest_reg_or_stack}")
+        else:
+            # 目标是寄存器，直接加载
+            riscv_instructions.append(f"    li {dest_reg_or_stack}, {const_value}")
+        
+        return riscv_instructions
+    
+    def _translate_fconstant(self, instruction):
+        """翻译浮点常量指令"""
+        riscv_instructions = []
+        result = instruction.result
+        const_value = instruction.operands[0]
+        data_type = get_data_type(instruction.types[0]) if instruction.types else DataType.F32
+        
+        # 分配目标寄存器或栈位置
+        dest_reg_or_stack = self.allocator.allocate_register(result, data_type, True)
+        
+        try:
+            # 将浮点数转换为32位整数表示
+            float_val = float(const_value)
+            int_bits = struct.unpack('>I', struct.pack('>f', float_val))[0]
+            
+            # 使用临时整数寄存器加载，然后转移到浮点寄存器
+            temp_int_reg = self.allocator.get_temp_register()
+            riscv_instructions.append(f"    li {temp_int_reg}, 0x{int_bits:08x}")
+            
+            if '(sp)' in dest_reg_or_stack:
+                # 目标在栈上
+                temp_float_reg = self.allocator.get_temp_register()
+                riscv_instructions.append(f"    fmv.w.x {temp_float_reg}, {temp_int_reg}")
+                riscv_instructions.append(f"    fsw {temp_float_reg}, {dest_reg_or_stack}")
+            else:
+                # 目标是浮点寄存器
+                riscv_instructions.append(f"    fmv.w.x {dest_reg_or_stack}, {temp_int_reg}")
+                
+        except ValueError:
+            # 如果浮点数转换失败，使用默认值0.0
+            temp_int_reg = self.allocator.get_temp_register()
+            riscv_instructions.append(f"    li {temp_int_reg}, 0")
+            
+            if '(sp)' in dest_reg_or_stack:
+                temp_float_reg = self.allocator.get_temp_register()
+                riscv_instructions.append(f"    fmv.w.x {temp_float_reg}, {temp_int_reg}")
+                riscv_instructions.append(f"    fsw {temp_float_reg}, {dest_reg_or_stack}")
+            else:
+                riscv_instructions.append(f"    fmv.w.x {dest_reg_or_stack}, {temp_int_reg}")
+        
+        return riscv_instructions
