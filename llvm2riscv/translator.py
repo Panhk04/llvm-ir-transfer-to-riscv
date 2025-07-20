@@ -177,7 +177,7 @@ class OptimizedLLVMIRTranslator:
         # 找出未初始化的数组变量
         self.uninitialized_arrays = []
         for var_name, size, stack_offset in alloca_vars:
-            # 如果变量不在初始化列表中，说明需要零初始化
+            # 直接比较字符串，不需要类型转换
             if var_name not in initialized_vars:
                 self.uninitialized_arrays.append((var_name, size, stack_offset))
                 print(f"DEBUG: Found uninitialized array: {var_name}, size: {size}, offset: {stack_offset}")

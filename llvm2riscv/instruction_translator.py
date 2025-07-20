@@ -187,8 +187,21 @@ class InstructionTranslator:
                     load_instr = self._get_load_instruction(data_type)
                     
                     riscv_instructions.append(f"    {load_instr} {dest_reg_or_stack}, %lo({global_name})({dest_reg_or_stack})")
+            # 处理alloca分配的变量访问
+            elif src_ptr in self.allocator.stack_frame:
+                # 直接从alloca分配的栈位置加载
+                stack_location = f"{self.allocator.stack_frame[src_ptr]}(sp)"
+                load_instr = self._get_load_instruction(data_type)
+                
+                if '(sp)' in dest_reg_or_stack:
+                    temp_reg = self.allocator.get_temp_register()
+                    riscv_instructions.append(f"    {load_instr} {temp_reg}, {stack_location}")
+                    store_instr = self._get_store_instruction(data_type)
+                    riscv_instructions.append(f"    {store_instr} {temp_reg}, {dest_reg_or_stack}")
+                else:
+                    riscv_instructions.append(f"    {load_instr} {dest_reg_or_stack}, {stack_location}")
             else:
-                # 局部变量访问
+                # 处理其他类型的指针（如通过getelementptr计算的地址）
                 src_reg_or_stack = self.allocator.get_physical_reg(src_ptr)
                 
                 if not src_reg_or_stack:
@@ -223,28 +236,36 @@ class InstructionTranslator:
             dest_ptr = instruction.operands[1]
             data_type = get_data_type(instruction.types[0])
             
-            # 获取目标指针
-            ptr_reg_or_stack = self.allocator.get_physical_reg(dest_ptr)
-            
-            if not ptr_reg_or_stack:
-                riscv_instructions.append(f"    # ERROR: Cannot resolve destination pointer {dest_ptr}")
-                return riscv_instructions
-            
-            # 获取目标地址寄存器
-            if '(sp)' in ptr_reg_or_stack:
-                ptr_reg = self.allocator.get_temp_register()
-                riscv_instructions.append(f"    lw {ptr_reg}, {ptr_reg_or_stack}")
-            else:
-                ptr_reg = ptr_reg_or_stack
-            
             # 处理存储的值
             value_reg = self._get_or_load_operand(value, data_type, riscv_instructions)
             
-            # 根据数据类型选择存储指令
-            store_instr = self._get_store_instruction(data_type)
-            
-            if value_reg:
-                riscv_instructions.append(f"    {store_instr} {value_reg}, 0({ptr_reg})")
+            # 处理目标指针 - 修复alloca变量的存储逻辑
+            if dest_ptr in self.allocator.stack_frame:
+                # 直接存储到alloca分配的栈位置
+                stack_location = f"{self.allocator.stack_frame[dest_ptr]}(sp)"
+                store_instr = self._get_store_instruction(data_type)
+                if value_reg:
+                    riscv_instructions.append(f"    {store_instr} {value_reg}, {stack_location}")
+            else:
+                # 处理其他类型的指针（如通过getelementptr计算的地址）
+                ptr_reg_or_stack = self.allocator.get_physical_reg(dest_ptr)
+                
+                if not ptr_reg_or_stack:
+                    riscv_instructions.append(f"    # ERROR: Cannot resolve destination pointer {dest_ptr}")
+                    return riscv_instructions
+                
+                # 获取目标地址寄存器
+                if '(sp)' in ptr_reg_or_stack:
+                    ptr_reg = self.allocator.get_temp_register()
+                    riscv_instructions.append(f"    lw {ptr_reg}, {ptr_reg_or_stack}")
+                else:
+                    ptr_reg = ptr_reg_or_stack
+                
+                # 根据数据类型选择存储指令
+                store_instr = self._get_store_instruction(data_type)
+                
+                if value_reg:
+                    riscv_instructions.append(f"    {store_instr} {value_reg}, 0({ptr_reg})")
         
         return riscv_instructions
     
@@ -378,7 +399,7 @@ class InstructionTranslator:
         
         # 获取最终元素类型
         element_type_str = current_str.replace(']', '').replace('*', '').strip()
-        element_size = calculate_type_size(get_data_type(element_type_str))
+        element_size = calculate_type_size(element_type_str)  # 直接传递字符串，不转换为DataType
 
         # 3. 计算步长 - 修复步长计算逻辑
         strides = []
@@ -456,7 +477,7 @@ class InstructionTranslator:
         
         # 检查是否为立即数
         if operand.isdigit() or (operand.startswith('-') and operand[1:].isdigit()):
-            temp_reg = self.allocator.get_temp_register(is_float=is_float)
+            temp_reg = self.allocator.get_temp_register()
             riscv_instructions.append(f"    li {temp_reg}, {operand}")
             return temp_reg
         
@@ -465,8 +486,8 @@ class InstructionTranslator:
             try:
                 float_val = float(operand)
                 int_bits = struct.unpack('>I', struct.pack('>f', float_val))[0]
-                temp_reg_int = self.allocator.get_temp_register(is_float=False)
-                temp_reg_float = self.allocator.get_temp_register(is_float=True)
+                temp_reg_int = self.allocator.get_temp_register()
+                temp_reg_float = self.allocator.get_temp_register()
                 riscv_instructions.append(f"    li {temp_reg_int}, 0x{int_bits:08x}")
                 riscv_instructions.append(f"    fmv.w.x {temp_reg_float}, {temp_reg_int}")
                 return temp_reg_float
@@ -479,7 +500,7 @@ class InstructionTranslator:
             if reg_or_stack:
                 if '(sp)' in reg_or_stack:
                     # 从栈加载
-                    temp_reg = self.allocator.get_temp_register(is_float=is_float)
+                    temp_reg = self.allocator.get_temp_register()
                     load_instr = self._get_load_instruction(data_type)
                     riscv_instructions.append(f"    {load_instr} {temp_reg}, {reg_or_stack}")
                     return temp_reg
@@ -490,6 +511,42 @@ class InstructionTranslator:
         # 如果都失败，返回None
         riscv_instructions.append(f"    # ERROR: Could not resolve operand {operand}")
         return None
+
+    def _get_load_instruction(self, data_type):
+        """根据数据类型返回对应的RISC-V加载指令"""
+        if data_type == DataType.I1:
+            return "lbu"  # 加载无符号字节
+        elif data_type == DataType.I8:
+            return "lb"   # 加载有符号字节
+        elif data_type == DataType.I16:
+            return "lh"   # 加载半字
+        elif data_type == DataType.I32:
+            return "lw"   # 加载字
+        elif data_type == DataType.I64:
+            return "ld"   # 加载双字
+        elif data_type == DataType.F32:
+            return "flw"  # 加载单精度浮点
+        elif data_type == DataType.F64:
+            return "fld"  # 加载双精度浮点
+        else:
+            return "lw"   # 默认使用字加载
+    
+    def _get_store_instruction(self, data_type):
+        """根据数据类型返回对应的RISC-V存储指令"""
+        if data_type in [DataType.I1, DataType.I8]:
+            return "sb"   # 存储字节
+        elif data_type == DataType.I16:
+            return "sh"   # 存储半字
+        elif data_type == DataType.I32:
+            return "sw"   # 存储字
+        elif data_type == DataType.I64:
+            return "sd"   # 存储双字
+        elif data_type == DataType.F32:
+            return "fsw"  # 存储单精度浮点
+        elif data_type == DataType.F64:
+            return "fsd"  # 存储双精度浮点
+        else:
+            return "sw"   # 默认使用字存储
 
     def _translate_compare(self, instruction):
         """翻译比较指令"""
@@ -563,186 +620,15 @@ class InstructionTranslator:
                 target_label = self.label_map.get(instruction.operands[0], "unknown_label")
                 riscv_instructions.append(f"    j {target_label}")
             else:  # 条件跳转
-                cond_var = instruction.operands[0]
+                cond = instruction.operands[0]
                 true_label = self.label_map.get(instruction.operands[1], "unknown_label")
                 false_label = self.label_map.get(instruction.operands[2], "unknown_label")
                 
-                cond_reg = self._get_or_load_operand(cond_var, DataType.I1, riscv_instructions)
+                # 获取条件寄存器
+                cond_reg = self._get_or_load_operand(cond, DataType.I1, riscv_instructions)
                 
+                # 生成条件跳转指令
                 riscv_instructions.append(f"    bnez {cond_reg}, {true_label}")
                 riscv_instructions.append(f"    j {false_label}")
         
         return riscv_instructions
-    
-    def _translate_call(self, instruction):
-        """翻译函数调用指令"""
-        riscv_instructions = []
-        func_name = instruction.operands[0].lstrip('@')
-        result_var = instruction.result
-        
-        # 1. 处理参数
-        arg_regs_int = ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']
-        arg_regs_float = ['fa0', 'fa1', 'fa2', 'fa3', 'fa4', 'fa5', 'fa6', 'fa7']
-        int_arg_count = 0
-        float_arg_count = 0
-        
-        # 第一个操作数是函数名，参数从第二个开始
-        # instruction.types[0]是返回类型，参数类型从1开始
-        for i, arg in enumerate(instruction.operands[1:]):
-            arg_type = get_data_type(instruction.types[i+1])
-            is_float = arg_type in [DataType.F32, DataType.F64]
-            
-            arg_reg = self._get_or_load_operand(arg, arg_type, riscv_instructions)
-            
-            if is_float:
-                if float_arg_count < len(arg_regs_float):
-                    dest_reg = arg_regs_float[float_arg_count]
-                    riscv_instructions.append(f"    fmv.s {dest_reg}, {arg_reg}")
-                    float_arg_count += 1
-                else:
-                    # 栈上传递参数（暂未完全支持）
-                    riscv_instructions.append(f"    # TODO: Pass float arg on stack")
-            else:
-                if int_arg_count < len(arg_regs_int):
-                    dest_reg = arg_regs_int[int_arg_count]
-                    riscv_instructions.append(f"    mv {dest_reg}, {arg_reg}")
-                    int_arg_count += 1
-                else:
-                    # 栈上传递参数（暂未完全支持）
-                    riscv_instructions.append(f"    # TODO: Pass int arg on stack")
-
-        # 2. 函数调用
-        riscv_instructions.append(f"    call {func_name}")
-        
-        # 3. 处理返回值
-        if result_var:
-            ret_type = get_data_type(instruction.types[0])
-            is_float = ret_type in [DataType.F32, DataType.F64]
-            
-            dest_reg_or_stack = self.allocator.allocate_register(result_var, ret_type, is_float)
-            
-            if is_float:
-                source_reg = 'fa0'
-                if '(sp)' in dest_reg_or_stack:
-                    store_instr = self._get_store_instruction(ret_type)
-                    riscv_instructions.append(f"    {store_instr} {source_reg}, {dest_reg_or_stack}")
-                else:
-                    riscv_instructions.append(f"    fmv.s {dest_reg_or_stack}, {source_reg}")
-            else:
-                source_reg = 'a0'
-                if '(sp)' in dest_reg_or_stack:
-                    store_instr = self._get_store_instruction(ret_type)
-                    riscv_instructions.append(f"    {store_instr} {source_reg}, {dest_reg_or_stack}")
-                else:
-                    riscv_instructions.append(f"    mv {dest_reg_or_stack}, {source_reg}")
-                    
-        return riscv_instructions
-
-    def _translate_cast(self, instruction):
-        """翻译类型转换指令"""
-        # 这是一个简化的实现，可以根据需要扩展
-        riscv_instructions = []
-        opcode = instruction.opcode
-        result = instruction.result
-        value = instruction.operands[0]
-        from_type = get_data_type(instruction.types[1])
-        to_type = get_data_type(instruction.types[0])
-
-        # 在RISC-V中，许多整数之间的转换（如zext, sext, trunc）
-        # 只要宽度不超过寄存器宽度（64位），通常不需要实际指令，
-        # 因为寄存器已经足够大。加载/存储指令会处理好符号扩展。
-        # 浮点和整数之间的转换则需要特定指令。
-
-        val_reg = self._get_or_load_operand(value, from_type, riscv_instructions)
-        dest_reg_or_stack = self.allocator.allocate_register(result, to_type, to_type in [DataType.F32, DataType.F64])
-
-        dest_reg = dest_reg_or_stack
-        if '(sp)' in dest_reg_or_stack:
-            dest_reg = self.allocator.get_temp_register(is_float=to_type in [DataType.F32, DataType.F64])
-
-        # 整数到浮点
-        if opcode == 'sitofp':
-            riscv_instructions.append(f"    fcvt.s.w {dest_reg}, {val_reg}")
-        # 浮点到整数
-        elif opcode == 'fptosi':
-            riscv_instructions.append(f"    fcvt.w.s {dest_reg}, {val_reg}, rtz") # 使用向零舍入
-        # 浮点扩展/截断
-        elif opcode in ['fpext', 'fptrunc']:
-             riscv_instructions.append(f"    fmv.s {dest_reg}, {val_reg}") # 简化处理
-        # 其他情况，暂时只做移动
-        else:
-            riscv_instructions.append(f"    mv {dest_reg}, {val_reg}")
-
-        if '(sp)' in dest_reg_or_stack:
-            store_instr = self._get_store_instruction(to_type)
-            riscv_instructions.append(f"    {store_instr} {dest_reg}, {dest_reg_or_stack}")
-
-        return riscv_instructions
-    
-    def _translate_constant(self, instruction):
-        """翻译常量加载指令"""
-        riscv_instructions = []
-        result = instruction.result
-        value = instruction.operands[0]
-        data_type = get_data_type(instruction.types[0])
-        
-        dest_reg_or_stack = self.allocator.allocate_register(result, data_type, False)
-        
-        if '(sp)' in dest_reg_or_stack:
-            temp_reg = self.allocator.get_temp_register()
-            riscv_instructions.append(f"    li {temp_reg}, {value}")
-            self.allocator.store_to_stack_if_needed(temp_reg, dest_reg_or_stack, data_type, riscv_instructions)
-        else:
-            riscv_instructions.append(f"    li {dest_reg_or_stack}, {value}")
-            
-        return riscv_instructions
-
-    def _translate_fconstant(self, instruction):
-        """翻译浮点常量加载指令"""
-        riscv_instructions = []
-        result = instruction.result
-        value_str = instruction.operands[0]
-        data_type = get_data_type(instruction.types[0])
-
-        dest_reg_or_stack = self.allocator.allocate_register(result, data_type, True)
-
-        try:
-            float_val = float(value_str)
-            # 将浮点数转换为32位整数表示
-            int_bits = struct.unpack('>I', struct.pack('>f', float_val))[0]
-            
-            temp_int_reg = self.allocator.get_temp_register()
-            riscv_instructions.append(f"    li {temp_int_reg}, 0x{int_bits:08x}")
-
-            if '(sp)' in dest_reg_or_stack:
-                temp_float_reg = self.allocator.get_temp_register(is_float=True)
-                riscv_instructions.append(f"    fmv.w.x {temp_float_reg}, {temp_int_reg}")
-                store_instr = self._get_store_instruction(data_type)
-                riscv_instructions.append(f"    {store_instr} {temp_float_reg}, {dest_reg_or_stack}")
-            else:
-                riscv_instructions.append(f"    fmv.w.x {dest_reg_or_stack}, {temp_int_reg}")
-
-        except ValueError:
-            riscv_instructions.append(f"    # ERROR: Invalid float constant {value_str}")
-
-        return riscv_instructions
-
-    def _get_load_instruction(self, data_type):
-        """根据数据类型获取加载指令"""
-        if data_type == DataType.F32: return "flw"
-        if data_type == DataType.F64: return "fld"
-        if data_type == DataType.I32: return "lw"
-        if data_type == DataType.I16: return "lh"
-        if data_type == DataType.I8: return "lb"
-        if data_type == DataType.I1: return "lb"
-        return "lw" # 默认
-
-    def _get_store_instruction(self, data_type):
-        """根据数据类型获取存储指令"""
-        if data_type == DataType.F32: return "fsw"
-        if data_type == DataType.F64: return "fsd"
-        if data_type == DataType.I32: return "sw"
-        if data_type == DataType.I16: return "sh"
-        if data_type == DataType.I8: return "sb"
-        if data_type == DataType.I1: return "sb"
-        return "sw" # 默认
